@@ -1,0 +1,132 @@
+from enveditor import *
+import math
+import random
+
+# === GRAIN HELPER: Get sample with bounds check ===
+def safe_get(samples, idx, default=0.0):
+    if 0 <= idx < len(samples):
+        return samples[idx]
+    else:
+        return default
+
+# === Pitch shift with linear interpolation ===
+def pitch_shift_grain(grain, shift_semitones):
+    ratio = 2 ** (shift_semitones / 12.0)
+    length = len(grain)
+    new_length = int(length / ratio)
+    result = [0.0] * new_length
+    for i in range(new_length):
+        src_idx = i * ratio
+        idx0 = int(math.floor(src_idx))
+        idx1 = min(idx0 + 1, length - 1)
+        frac = src_idx - idx0
+        s0 = grain[idx0]
+        s1 = grain[idx1]
+        result[i] = s0 + (s1 - s0) * frac
+    return result
+
+# === MAIN PROCESS ===
+def process_grain(grain_len, spread, repeat, dens, despike, gain, pitchshift, velocity):
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+    if x2 <= x1:
+        x1 = 0
+        x2 = EditorSample.Length - 1
+    full_len = x2 - x1 + 1
+    sample_rate = EditorSample.SampleRate
+    num_chans = EditorSample.NumChans
+
+    # Convert grain length (ms) to samples
+    base_grain_samples = max(1, int(round((grain_len / 1000.0) * sample_rate)))
+
+    # Create list of input samples per channel
+    original = [
+        [EditorSample.GetSampleAt(x1 + i, c) for i in range(full_len)]
+        for c in range(num_chans)
+    ]
+
+    spread_ratio = max(1.0, spread)
+    out_len = int(full_len * spread_ratio)
+    EditorSample.Length = x1 + out_len
+
+    output = [[0.0 for _ in range(out_len)] for _ in range(num_chans)]
+    grain_count = int(out_len * dens / base_grain_samples)
+
+    for g in range(grain_count):
+        # Velocity ratio (from 1 - velocity to 1 + velocity)
+        velocity_ratio = 1.0 + ((g / max(1, grain_count - 1)) - 0.5) * 2 * velocity
+        grain_samples = int(base_grain_samples / max(0.25, velocity_ratio))
+
+        # Envelope for this grain
+        grain_env = [0.5 - 0.5 * math.cos(2 * math.pi * i / max(1, grain_samples - 1)) for i in range(grain_samples)]
+
+        # Random input position
+        src_pos = random.randint(0, full_len - grain_samples)
+
+        # Random output position
+        dst_pos = int(g * grain_samples / dens)
+        dst_pos = min(dst_pos, out_len - grain_samples)
+
+        for c in range(num_chans):
+            # Get grain
+            grain = [safe_get(original[c], src_pos + i) for i in range(grain_samples)]
+
+            # Pitch shift
+            shifted = pitch_shift_grain(grain, pitchshift)
+            env = [0.5 - 0.5 * math.cos(2 * math.pi * i / max(1, len(shifted) - 1)) for i in range(len(shifted))]
+
+            # Overlap-add
+            for i in range(len(shifted)):
+                if dst_pos + i < out_len:
+                    output[c][dst_pos + i] += shifted[i] * env[i]
+
+        Utils.ProgressMsg(f"GRAIN {g+1}/{grain_count}", g+1, grain_count)
+
+    # Normalize if requested
+    for c in range(num_chans):
+        max_val = max(abs(s) for s in output[c]) if output[c] else 1.0
+        scale = 1.0 / max_val if despike and max_val > 0 else 1.0
+        for i in range(out_len):
+            output[c][i] *= gain * scale
+
+    # Write back
+    for c in range(num_chans):
+        for i in range(out_len):
+            EditorSample.SetSampleAt(x1 + i, c, output[c][i])
+
+# === INTERFACE ===
+form = ScriptDialog(
+    "Grain (with Pitch & Velocity).",
+    "Time-spread the selection with grains. Guess, it's inspired by Soundshaper 6/CDP8, but it's not the same.\n"
+    "Includes pitch shift and velocity spread.\n\n"
+    "GRAIN-LEN: grain duration in ms (1–1000).\n"
+    "SPREAD: output time stretch ratio (>1 = stretch).\n"
+    "REPEAT: number of times grains are replayed (not used directly).\n"
+    "DENSITY: grains per original grain (0.1–10).\n"
+    "PITCHSHIFT: pitch change in semitones (-24 to +24).\n"
+    "VELOCITY: grain length modulation (0.0–1.0).\n"
+    "DESPIKE: normalize output to prevent overload.\n"
+    "GAIN: final output gain.\n\n"
+    "Made by D. Stativkin, GitHub - emptyjp"
+)
+
+form.AddInputKnob("GRAIN-LEN",   100.0,   1.0, 1000.0)
+form.AddInputKnob("SPREAD",       1.5,   0.1,   10.0)
+form.AddInputKnob("REPEAT",       2.0,   1.0,   10.0)  # Not used directly, just for compatibility
+form.AddInputKnob("DENSITY",      1.0,   0.1,   10.0)
+form.AddInputKnob("PITCHSHIFT",   0.0, -24.0,  24.0)
+form.AddInputKnob("VELOCITY",     0.0,   0.0,   1.0)
+form.AddInputCombo("DESPIKE",     "Yes,No", 0)
+form.AddInputKnob("GAIN",         1.0,   0.1,   10.0)
+
+if form.Execute():
+    grain_len = form.GetInputValue("GRAIN-LEN")
+    spread = form.GetInputValue("SPREAD")
+    repeat = int(form.GetInputValue("REPEAT"))  # Currently unused
+    dens = form.GetInputValue("DENSITY")
+    pitchshift = form.GetInputValue("PITCHSHIFT")
+    velocity = form.GetInputValue("VELOCITY")
+    despike = (form.GetInputValue("DESPIKE") == 0)
+    gain = form.GetInputValue("GAIN")
+
+    process_grain(grain_len, spread, repeat, dens, despike, gain, pitchshift, velocity)

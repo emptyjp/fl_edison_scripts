@@ -1,0 +1,92 @@
+from enveditor import *
+
+def process_stadium_echo(gain, rolloff, gap_mult, echo_density, cut_tail):
+    import random
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+    if x2 <= x1:
+        x1 = 0
+        x2 = EditorSample.Length - 1
+
+    input_len = x2 - x1 + 1
+    sr = EditorSample.SampleRate
+    max_gap = gap_mult * 0.1  # в секундах
+    max_offset_samples = int(max_gap * sr)
+
+    # Входной сигнал
+    input_data = [EditorSample.GetSampleAt(x1 + i, 0) for i in range(input_len)]
+
+    # Финальная длина: с хвостом или без
+    out_len = input_len + (max_offset_samples if not cut_tail else 0)
+
+    output_L = [0.0] * out_len
+    output_R = [0.0] * out_len
+
+    # Основной сигнал
+    for i in range(input_len):
+        val = input_data[i] * gain
+        output_L[i] += val
+        output_R[i] += val
+
+    # Эхо
+    for i in range(echo_density):
+        time_offset = int(random.uniform(0.0, max_offset_samples))
+        attenuation = gain * (rolloff ** random.uniform(0.0, 4.0))
+        ch = i % 2  # 0 = L, 1 = R
+
+        for j in range(input_len):
+            idx = j + time_offset
+            if idx >= out_len:
+                break
+            echo_val = input_data[j] * attenuation
+            if ch == 0:
+                output_L[idx] += echo_val
+            else:
+                output_R[idx] += echo_val
+
+        Utils.ProgressMsg("Stadium Echo", i, echo_density)
+
+    # Нормализация
+    peak = max(
+        max(abs(sample) for sample in output_L),
+        max(abs(sample) for sample in output_R)
+    )
+    if peak > 0:
+        norm_factor = 1.0 / peak
+        output_L = [s * norm_factor for s in output_L]
+        output_R = [s * norm_factor for s in output_R]
+
+    # Установка как стерео
+    EditorSample.NumChans = 2
+    EditorSample.Length = x1 + (input_len if cut_tail else out_len)
+
+    for i in range(EditorSample.Length - x1):
+        val_L = output_L[i] if i < len(output_L) else 0.0
+        val_R = output_R[i] if i < len(output_R) else 0.0
+        EditorSample.SetSampleAt(x1 + i, 0, val_L)
+        EditorSample.SetSampleAt(x1 + i, 1, val_R)
+
+
+
+# === GUI ===
+form = ScriptDialog("Stadium Echo (Dense)", "Dense stadium echo. Inspired by Soundshaper 6.\n\n"
+"GAIN - Gain of the input signal\n"
+"ROLL-OFF - How fast the echo fades\n"
+"GAP SIZE - Effect on the scale of the delay between echoes\n"
+"COUNT - Echo density\n"
+"CUT TAIL - Whether to trim the tail (if No - the long tail of the echo is retained).\n\n"
+"Made by D. Stativkin with ChatGPT, GitHub - emptyjp")
+form.AddInputKnob("GAIN", 0.646, 0.000031, 1.0)
+form.AddInputKnob("ROLL-OFF", 1.0, 0.000031, 1.0)
+form.AddInputKnob("GAP SIZE", 1.0, 0.000005, 50.0)
+form.AddInputKnob("COUNT", 100.0, 2.0, 1000.0)
+form.AddInputCombo("CUT TAIL", "Yes,No", 1)
+
+if form.Execute():
+    process_stadium_echo(
+        form.GetInputValue("GAIN"),
+        form.GetInputValue("ROLL-OFF"),
+        form.GetInputValue("GAP SIZE"),
+        int(form.GetInputValue("COUNT")),
+        form.GetInputValue("CUT TAIL") == 0
+    )

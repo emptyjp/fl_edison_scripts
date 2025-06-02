@@ -1,0 +1,118 @@
+from enveditor import *
+import math
+
+# === ACCEL: Accelerate/Decelerate over time ===
+def process_accel(start_time, stop_time, ratio):
+    # Убедимся, что ratio > 0
+    try:
+        ratio = float(ratio)
+    except:
+        return
+    if ratio <= 0.0:
+        return
+
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+    if x2 <= x1:
+        x1 = 0
+        x2 = EditorSample.Length - 1
+
+    full_len = x2 - x1 + 1
+    sr = EditorSample.SampleRate
+    num_chans = EditorSample.NumChans
+
+    # Ограничим START и STOP длиной файла
+    file_dur = full_len / sr
+    start_time = max(0.0, min(start_time, file_dur))
+    stop_time  = max(start_time, min(stop_time, file_dur))
+
+    # Считаем входные сэмплы в память
+    original = [
+        [EditorSample.GetSampleAt(x1 + i, c) for i in range(full_len)]
+        for c in range(num_chans)
+    ]
+
+    # Нам нужны эти величины для формулы
+    t0 = start_time
+    t1 = stop_time
+    R  = ratio
+
+    # Вычисляем, где окажется "входное" время при t_out = t1
+    # Формула: t_in_stop = t1 + (R-1)*(t1 - t0)/2
+    if t1 > t0:
+        t_in_stop = t1 + (R - 1) * (t1 - t0) / 2.0
+    else:
+        t_in_stop = t1
+
+    # Будем поэтапно строить выход
+    output = [[] for _ in range(num_chans)]
+    n_out = 0
+
+    while True:
+        t_out = n_out / sr
+
+        # Рассчитываем соответствующее t_in
+        if t_out <= t0:
+            t_in = t_out
+        elif t_out <= t1 and t1 > t0:
+            # В зоне линейного разгона/торможения
+            dt = t_out - t0
+            t_in = t_out + (R - 1) * (dt * dt) / (2.0 * (t1 - t0))
+        else:
+            # После достижения цели
+            t_in = t_in_stop + R * (t_out - t1)
+
+        # Если мы вышли за пределы входа — заканчиваем
+        if t_in * sr >= full_len:
+            break
+
+        # Делаем линейную интерполяцию между ближайшими сэмплами
+        idx = t_in * sr
+        idx0 = int(math.floor(idx))
+        frac = idx - idx0
+
+        for c in range(num_chans):
+            s0 = original[c][idx0] if idx0 < full_len else 0.0
+            s1 = original[c][idx0 + 1] if (idx0 + 1) < full_len else 0.0
+            val = s0 * (1.0 - frac) + s1 * frac
+            output[c].append(val)
+
+        n_out += 1
+
+    # Нормализация по пиковому значению
+    peak = 0.0
+    for c in range(num_chans):
+        for s in output[c]:
+            if abs(s) > peak:
+                peak = abs(s)
+    norm = (1.0 / peak) if peak > 0.0 else 1.0
+
+    # Пишем обратно в Edison
+    EditorSample.NumChans = num_chans
+    out_len = len(output[0])
+    EditorSample.Length = x1 + out_len
+
+    for c in range(num_chans):
+        for i in range(out_len):
+            EditorSample.SetSampleAt(x1 + i, c, output[c][i] * norm)
+
+
+# === INTERFACE ===
+form = ScriptDialog(
+    "ACCEL: Accelerate/Decelerate",
+    "ACCEL changes speed by raising or lowering the pitch.\n"
+    "START: Time (seconds) in the input where the change begins.\n"
+    "STOP:  Time (seconds) in the output by which the target speed should be reached.\n"
+    "RATIO: Speed multiplier (<1 = slower, >1 = faster)."
+)
+
+file_len = EditorSample.Length / EditorSample.SampleRate
+form.AddInputKnob("START", 0.0, 0.0, file_len)
+form.AddInputKnob("STOP", max(0.001, file_len), 0.0, file_len)
+form.AddInputKnob("RATIO", 1.0, 0.1, 10.0)
+
+if form.Execute():
+    start_t = form.GetInputValue("START")
+    stop_t  = form.GetInputValue("STOP")
+    ratio   = form.GetInputValue("RATIO")
+    process_accel(start_t, stop_t, ratio)

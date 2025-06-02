@@ -1,0 +1,110 @@
+from enveditor import *
+import math
+
+
+# === CYCFREQ MODE 1: Raise frequency by shortening/copying & inverting mini-cycles ===
+def process_cycfreq(ratio):
+    # Проверяем, что ratio — целое ≥ 2
+    try:
+        ratio = int(ratio)
+    except:
+        return
+    if ratio < 2:
+        return
+
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+    if x2 <= x1:
+        x1 = 0
+        x2 = EditorSample.Length - 1
+
+    full_len = x2 - x1 + 1
+    num_chans = EditorSample.NumChans
+
+    # 1) Считываем исходный буфер по каналам
+    original = [
+        [EditorSample.GetSampleAt(x1 + i, c) for i in range(full_len)]
+        for c in range(num_chans)
+    ]
+
+    # 2) Находим границы "псевдо-циклов" по нулевым пересечениям первого канала
+    zeros = [0]
+    for i in range(1, full_len):
+        prev = original[0][i - 1]
+        curr = original[0][i]
+        if prev <= 0.0 and curr > 0.0:
+            zeros.append(i)
+    zeros.append(full_len)
+
+    # 3) Подготавливаем выходной буфер той же длины
+    output = [[0.0] * full_len for _ in range(num_chans)]
+
+    # 4) Обрабатываем каждый цикл отдельно
+    for z in range(len(zeros) - 1):
+        c_start = zeros[z]
+        c_end = zeros[z + 1]
+        cycle_len = c_end - c_start
+        if cycle_len < ratio:
+            # если цикл слишком короткий, просто копируем его без изменения
+            for c in range(num_chans):
+                for i in range(c_start, c_end):
+                    output[c][i] = original[c][i]
+            continue
+
+        # длина одного мини-цикла
+        mini_len = cycle_len // ratio
+        if mini_len < 1:
+            for c in range(num_chans):
+                for i in range(c_start, c_end):
+                    output[c][i] = original[c][i]
+            continue
+
+        # 5) Для каждого mini-cycle копируем и инвертируем чередующиеся
+        for r in range(ratio):
+            inv = (r % 2 == 1)
+            for j in range(mini_len):
+                src_idx = c_start + j
+                dst_idx = c_start + r * mini_len + j
+                if dst_idx >= c_end:
+                    break
+                for c in range(num_chans):
+                    val = original[c][src_idx]
+                    if inv:
+                        val = -val
+                    output[c][dst_idx] = val
+
+        # 6) Если остались «лишние» сэмплы в конце цикла (перед c_end), скопируем их из исходного
+        tail_start = c_start + ratio * mini_len
+        for i in range(tail_start, c_end):
+            for c in range(num_chans):
+                output[c][i] = original[c][i]
+
+    # 7) Нормализация по пику
+    peak = 0.0
+    for c in range(num_chans):
+        for s in output[c]:
+            if abs(s) > peak:
+                peak = abs(s)
+    if peak > 0.0:
+        norm = 1.0 / peak
+    else:
+        norm = 1.0
+
+    # 8) Запись в Edison (перезаписываем ту же длину)
+    EditorSample.NumChans = num_chans
+    EditorSample.Length = x1 + full_len
+    for c in range(num_chans):
+        for i in range(full_len):
+            EditorSample.SetSampleAt(x1 + i, c, output[c][i] * norm)
+
+
+# === INTERFACE ===
+form = ScriptDialog(
+    "Broken Toy\n",
+    "This is poorly executed CYCFREQ algo from CDP8\n"
+    "RATIO ≥ 2, and, the higher - the weirder. Enjoy. Made by emptyjp"
+)
+form.AddInputKnob("RATIO", 2.0, 2.0, 16.0)
+
+if form.Execute():
+    process_cycfreq(form.GetInputValue("RATIO"))
