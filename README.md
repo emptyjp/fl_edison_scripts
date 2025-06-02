@@ -11,9 +11,9 @@ C:\Users\%UserProfile%\Documents\Image-Line\FL Studio\Settings\Audio scripts
 
 You can make a separate folder for my scripts and name it "emptyjp".
 
-#Creations that I'm most proud of:
+# Creations that I'm most proud of:
 
-##Audioscape ASA-6A: nine-tube, multi-transformer emulation with trim, bass preservation.
+## Audioscape ASA-6A: nine-tube, multi-transformer emulation with trim, bass preservation.
 ![Audioscape ASA-6A](/img/asa6a.png?raw=true "Audioscape ASA-6A")
 
 Yeah, this is, like, the best thing I've ever created. It's cool.
