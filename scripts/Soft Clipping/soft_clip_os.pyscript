@@ -1,0 +1,68 @@
+from enveditor import *
+import math
+# made by D. Stativkin with love and ChatGPT
+def soft_clip_shape(val, threshold, knee, mode):
+    absval = abs(val)
+    sign = 1 if val >= 0 else -1
+
+    if absval <= threshold:
+        return val
+
+    excess = absval - threshold
+
+    if mode == 0:  # Exponential
+        softened = threshold + (1 - math.exp(-excess / knee)) * knee
+    elif mode == 1:  # Tanh
+        softened = threshold + math.tanh(excess / knee) * knee
+    elif mode == 2:  # Arctangent
+        softened = threshold + (2 / math.pi) * math.atan(excess / knee) * knee
+    else:
+        softened = absval  # fallback (shouldn't happen)
+
+    return sign * softened
+
+def soft_clipper(threshold, knee, outputGain, oversample_factor, mode):
+    if oversample_factor > 1:
+        original_sr = EditorSample.SampleRate
+        EditorSample.SampleRate = int(EditorSample.SampleRate * oversample_factor)
+
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+    if x2 <= x1:
+        x1 = 0
+        x2 = EditorSample.Length - 1
+
+    knee = max(0.001, knee)
+
+    for n in range(x1, x2 + 1):
+        if (n - x1) % 10000 == 0:
+            Utils.ProgressMsg("Soft Clipping", n - x1, x2 - x1)
+
+        for c in range(EditorSample.NumChans):
+            val = EditorSample.GetSampleAt(n, c)
+            clipped = soft_clip_shape(val, threshold, knee, mode)
+            clipped *= outputGain
+            EditorSample.SetSampleAt(n, c, clipped)
+
+    if oversample_factor > 1:
+        EditorSample.SampleRate = original_sr
+
+# --- Диалог ---
+form = ScriptDialog("Soft Clipper", "Soft clip selected audio with oversampling and curve choice")
+form.AddInputKnob("Threshold", 0.8, 0.01, 1.0)
+form.AddInputKnob("Knee", 0.2, 0.01, 1.0)
+form.AddInputKnob("Output Gain", 1.0, 0.1, 4.0)
+form.AddInputCombo("Oversample", "1x (Off),2x,4x,8x,16x,32x", 3)
+form.AddInputCombo("Curve", "Exponential,Tanh,Arctangent", 0)
+
+# --- Применение ---
+if form.Execute():
+    threshold = form.GetInputValue("Threshold")
+    knee = form.GetInputValue("Knee")
+    gain = form.GetInputValue("Output Gain")
+    oversample_index = form.GetInputValue("Oversample")
+    curve_mode = form.GetInputValue("Curve")
+    oversample_map = [1, 2, 4, 8, 16, 32]
+    oversample_factor = oversample_map[oversample_index]
+
+    soft_clipper(threshold, knee, gain, oversample_factor, curve_mode)

@@ -1,0 +1,213 @@
+from enveditor import *
+import math
+# Made by D. Stativkin with ChatGPT and Love (github - emptyjp)
+# === Интерполяция огибающей ===
+def interpolate_envelope(envelope, length):
+    interpolated = []
+    for i in range(length):
+        x  = i * (len(envelope) - 1) / (length - 1)
+        i0 = int(math.floor(x))
+        i1 = min(i0 + 1, len(envelope) - 1)
+        t  = x - i0
+        a  = envelope[i0]
+        b  = envelope[i1]
+        interpolated.append((1 - t) * a + t * b)
+    return interpolated
+
+# === Сглаживание (экспоненциальный фильтр) ===
+def smooth_envelope(env, alpha):
+    if alpha <= 0.0:
+        return env
+    smoothed = [env[0]]
+    for i in range(1, len(env)):
+        smoothed.append(alpha * env[i] + (1 - alpha) * smoothed[-1])
+    return smoothed
+
+# === Расчёт RMS-огибающей ===
+def compute_envelope(length, step):
+    envelope = []
+    for i in range(0, length, step):
+        sum_sq = 0.0
+        count  = 0
+        for j in range(i, min(i + step, length)):
+            for c in range(EditorSample.NumChans):
+                val = EditorSample.GetSampleAt(j, c)
+                sum_sq += val * val
+                count  += 1
+        rms = math.sqrt(sum_sq / count) if count > 0 else 0.0
+        envelope.append(rms)
+    return envelope
+
+# === Soft-клипинг с вариантами колена ===
+def soft_clip(x, threshold, knee, curve):
+    abs_x = abs(x)
+    if abs_x <= threshold:
+        return x
+
+    excess = abs_x - threshold
+    t = excess / knee if knee > 0 else 1.0
+
+    if curve == "Exponential":
+        clipped = threshold + (1 - math.exp(-t)) * knee
+
+    elif curve == "Sine":
+        clipped = threshold + math.sin(min(t, 1.0) * (math.pi / 2)) * knee
+
+    elif curve == "Tanh":
+        clipped = threshold + math.tanh(min(t, 1.0)) * knee
+
+    elif curve == "Arctangent":
+        clipped = threshold + (math.atan(min(t, 1.0) * 2) / math.atan(2)) * knee
+
+    elif curve == "Logarithmic":
+        clipped = threshold + math.log1p(min(t, 1.0) * (math.e - 1)) * knee
+
+    elif curve == "Smoothstep":
+        tt = min(t, 1.0)
+        clipped = threshold + (tt * tt * (3 - 2 * tt)) * knee
+
+    else:
+        clipped = threshold + min(t, 1.0) * knee
+
+    return math.copysign(min(clipped, threshold + knee), x)
+
+def soft_clip_asym(x, threshold_pos, knee_pos, curve_pos,
+                        threshold_neg, knee_neg, curve_neg):
+    if x >= 0:
+        return soft_clip(x, threshold_pos, knee_pos, curve_pos)
+    else:
+        return soft_clip(x, threshold_neg, knee_neg, curve_neg)
+
+# === Основная функция обработки ===
+def process(th_pos, kn_pos, crv_pos, th_neg, kn_neg, crv_neg,
+            oversample_factor, smoothing, restore_env, dry_wet, gain):
+
+    # 0) Выводим текущую частоту дискретизации
+    current_sr = EditorSample.SampleRate
+    # Utils.ShowMessage(f"Исходная частота дискретизации: {current_sr} Гц")
+
+    # 1) Определяем диапазон выделения
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+    if x2 <= x1:
+        x1 = 0
+        x2 = EditorSample.Length - 1
+
+    length    = x2 - x1 + 1
+    up_length = length * oversample_factor
+
+    # Сохраняем «сухой» сигнал
+    original = [
+        [EditorSample.GetSampleAt(x1 + i, c) for i in range(length)]
+        for c in range(EditorSample.NumChans)
+    ]
+    upsampled = [[0.0] * up_length for _ in range(EditorSample.NumChans)]
+
+    # 2) Апсемплинг
+    for c in range(EditorSample.NumChans):
+        for i in range(length):
+            v = original[c][i]
+            for k in range(oversample_factor):
+                t = k / oversample_factor
+                if i < length - 1:
+                    nxt = original[c][i + 1]
+                    interp = (1 - t) * v + t * nxt
+                else:
+                    interp = v
+                upsampled[c][i * oversample_factor + k] = interp
+        # Обновляем прогресс для каждого канала
+        Utils.ProgressMsg(f"Upsampling (channel {c+1}/{EditorSample.NumChans})", c + 1, EditorSample.NumChans)
+
+    # 3) Вычисляем огибающую и интерполируем её
+    if restore_env:
+        env_step = max(32, current_sr // 1000)
+        envelope = compute_envelope(length, env_step)
+        envelope = smooth_envelope(envelope, smoothing)
+        interpolated_env = interpolate_envelope(envelope, up_length)
+        Utils.ProgressMsg("Вычисление огибающей", 1, 1)
+    else:
+        interpolated_env = [1.0] * up_length
+
+    # 4) Soft-clip + (возможное) восстановление амплитуды
+    for i in range(up_length):
+        if i % 10000 == 0:
+            Utils.ProgressMsg("Soft Clipping", i, up_length)
+        for c in range(EditorSample.NumChans):
+            v = upsampled[c][i]
+            soft_val = soft_clip_asym(v, th_pos, kn_pos, crv_pos, th_neg, kn_neg, crv_neg)
+
+
+            if restore_env:
+                # Умножаем soft_val на огибающую и гейн
+                clipped = soft_val * interpolated_env[i] * gain
+            else:
+                clipped = soft_val * gain
+
+            upsampled[c][i] = clipped
+
+    # 5) Даунсэмплинг + Dry/Wet
+    for i in range(length):
+        if i % 10000 == 0:
+            Utils.ProgressMsg("Downsampling + Dry/Wet", i, length)
+        for c in range(EditorSample.NumChans):
+            s = 0.0
+            base = i * oversample_factor
+            for k in range(oversample_factor):
+                s += upsampled[c][base + k]
+            avg = s / oversample_factor
+
+            dry   = original[c][i]
+            final = (1 - dry_wet) * dry + dry_wet * avg
+            EditorSample.SetSampleAt(x1 + i, c, final)
+
+    # Если был оверсэмплинг, возвращаем sample rate
+    if oversample_factor > 1:
+        EditorSample.SampleRate = current_sr
+
+# === Интерфейс ===
+form = ScriptDialog("Soft Clipper (Envelope Restore)", "Smooth soft-clip with RMS recovery, but also asymmetrical. Made by D. Stativkin with love.\n\n\nGithub - emptyjp")
+
+
+# Positive Half
+form.AddInputKnob("Threshold +", 0.8, 0.01, 1.0)
+form.AddInputKnob("Knee +",      0.1, 0.0,  1.0)
+form.AddInputCombo("Curve +",    "Exponential,Sine,Tanh,Arctangent,Logarithmic,Smoothstep", 0)
+
+# Negative Half
+form.AddInputKnob("Threshold -", 0.8, 0.01, 1.0)
+form.AddInputKnob("Knee -",      0.1, 0.0,  1.0)
+form.AddInputCombo("Curve -",    "Exponential,Sine,Tanh,Arctangent,Logarithmic,Smoothstep", 0)
+
+form.AddInputKnob("Output Gain", 1.0,  0.1,  4.0)
+form.AddInputCombo("Oversampling",     "1x,2x,4x,8x,16x,32x",           3)
+form.AddInputCombo("Restore Envelope", "Yes,No",                          1)
+
+form.AddInputKnob("Smoothing", 0.05, 0.0, 0.5)
+form.AddInputKnob("Dry/Wet",   1.0,  0.0, 1.0)
+
+if form.Execute():
+    # 1) Oversampling
+    overs_idx    = form.GetInputValue("Oversampling")
+    overs_map    = [1, 2, 4, 8, 16, 32]
+    oversample_f = overs_map[overs_idx]
+
+    # Положительная
+    th_pos = form.GetInputValue("Threshold +")
+    kn_pos = form.GetInputValue("Knee +")
+    crv_pos = ["Exponential","Sine","Tanh","Arctangent","Logarithmic","Smoothstep"][form.GetInputValue("Curve +")]
+
+    # Отрицательная
+    th_neg = form.GetInputValue("Threshold -")
+    kn_neg = form.GetInputValue("Knee -")
+    crv_neg = ["Exponential","Sine","Tanh","Arctangent","Logarithmic","Smoothstep"][form.GetInputValue("Curve -")]
+
+    # 3) Restore Envelope
+    restore_idx = form.GetInputValue("Restore Envelope")
+    restore_env = (restore_idx == 0)  # 0 → Yes, 1 → No
+
+    gain      = form.GetInputValue("Output Gain")
+    smoothing = form.GetInputValue("Smoothing")
+    dry_wet   = form.GetInputValue("Dry/Wet")
+
+    process(th_pos, kn_pos, crv_pos, th_neg, kn_neg, crv_neg,
+            oversample_f, smoothing, restore_env, dry_wet, gain)

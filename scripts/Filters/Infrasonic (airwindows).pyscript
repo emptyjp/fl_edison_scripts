@@ -1,0 +1,191 @@
+from enveditor import *
+import math
+
+# ===================================================
+# Infrasonic.pyscript: 1:1 port of Airwindows “Infrasonic” filter - by emptyjp (D. Stativkin)
+# © 2016 Chris “Airwindows” Johnson (MIT License)
+# This Edison script implements a 10th-order Butterworth high-pass
+# filter at 20 Hz using five cascaded biquad sections exactly as
+# in the original Airwindows Infrasonic plugin.
+# ===================================================
+
+def design_biquad_section(cutoff, Q, sample_rate):
+    """
+    Calculate the coefficients for a single biquad section (Direct Form I).
+    Parameters:
+      cutoff     – normalized cutoff frequency (e.g., 20.0 / sample_rate)
+      Q          – quality factor for this section
+      sample_rate – sample rate in Hz (unused here, cutoff is already normalized)
+    Returns a list of length 15:
+      [0] cutoff_norm
+      [1] Q
+      [2] b0
+      [3] b1
+      [4] b2
+      [5] a1
+      [6] a2
+      [7] x1 (past input sample #1, initialized to 0)
+      [8] x2 (past input sample #2, initialized to 0)
+      [9] y1 (past output sample #1, initialized to 0)
+     [10] y2 (past output sample #2, initialized to 0)
+     [11–14] unused (reserved, set to 0)
+    """
+    # In the original C++: biquadX[0] = 20.0 / getSampleRate()
+    # Here, cutoff is already 20.0 / sample_rate
+    K = math.tan(math.pi * cutoff)
+    norm = 1.0 / (1.0 + K / Q + K * K)
+    b0 = norm
+    b1 = -2.0 * norm
+    b2 = norm
+    a1 =  2.0 * (K * K - 1.0) * norm
+    a2 =  (1.0 - K / Q + K * K) * norm
+
+    # Initialize internal state to zero
+    return [
+        cutoff, Q,
+        b0, b1, b2, a1, a2,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0
+    ]
+
+def process_infrasonic():
+    """
+    Applies the Airwindows Infrasonic 10th-order Butterworth high-pass filter
+    at 20 Hz to the selected audio in Edison. No user parameters; simply run.
+    """
+    # 1) Determine the selected region (or use the entire sample if none)
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+    if x2 <= x1:
+        x1 = 0
+        x2 = EditorSample.Length - 1
+    length = x2 - x1 + 1
+
+    # 2) Set up filter parameters
+    sr = EditorSample.SampleRate
+    cutoff_norm = 20.0 / sr  # fixed 20 Hz cutoff normalized to [0, 0.5] range
+
+    # Q values for the five biquad sections (Butterworth 10th-order)
+    Q_values = [
+        0.50623256,
+        0.56116312,
+        0.70710678,
+        1.10134463,
+        3.19622661
+    ]
+
+    # 3) Build the five biquad sections: A, B, C, D, E
+    biquadA = design_biquad_section(cutoff_norm, Q_values[0], sr)
+    biquadB = design_biquad_section(cutoff_norm, Q_values[1], sr)
+    biquadC = design_biquad_section(cutoff_norm, Q_values[2], sr)
+    biquadD = design_biquad_section(cutoff_norm, Q_values[3], sr)
+    biquadE = design_biquad_section(cutoff_norm, Q_values[4], sr)
+
+    # 4) Initialize 32-bit dither / denormal prevention seeds
+    fpdL = 17  # any nonzero odd integer
+    fpdR = 29  # any nonzero odd integer
+
+    # 5) Main processing loop: for each sample index n and each channel c
+    for n in range(x1, x2 + 1):
+        # Update progress every 10 000 samples
+        if (n - x1) % 10000 == 0:
+            Utils.ProgressMsg("Infrasonic Filtering", n - x1, length)
+
+        for c in range(EditorSample.NumChans):
+            # 5.1) Read the input sample
+            sample = EditorSample.GetSampleAt(n, c)
+
+            # 5.2) Prevent denormal values: if magnitude < ~1e-23, inject tiny noise
+            if abs(sample) < 1.18e-23:
+                if c == 0:
+                    fpdL ^= (fpdL << 13)
+                    fpdL ^= (fpdL >> 17)
+                    fpdL ^= (fpdL << 5)
+                    sample = fpdL * 1.18e-17
+                else:
+                    fpdR ^= (fpdR << 13)
+                    fpdR ^= (fpdR >> 17)
+                    fpdR ^= (fpdR << 5)
+                    sample = fpdR * 1.18e-17
+
+            # 5.3) Cascade through biquad A → E (Direct Form I)
+            # Section A
+            outA = (
+                biquadA[2] * sample +
+                biquadA[3] * biquadA[7] +
+                biquadA[4] * biquadA[8] -
+                biquadA[5] * biquadA[9] -
+                biquadA[6] * biquadA[10]
+            )
+            biquadA[8] = biquadA[7]
+            biquadA[7] = sample
+            sample = outA
+            biquadA[10] = biquadA[9]
+            biquadA[9]  = sample
+
+            # Section B
+            outB = (
+                biquadB[2] * sample +
+                biquadB[3] * biquadB[7] +
+                biquadB[4] * biquadB[8] -
+                biquadB[5] * biquadB[9] -
+                biquadB[6] * biquadB[10]
+            )
+            biquadB[8] = biquadB[7]
+            biquadB[7] = sample
+            sample = outB
+            biquadB[10] = biquadB[9]
+            biquadB[9]  = sample
+
+            # Section C
+            outC = (
+                biquadC[2] * sample +
+                biquadC[3] * biquadC[7] +
+                biquadC[4] * biquadC[8] -
+                biquadC[5] * biquadC[9] -
+                biquadC[6] * biquadC[10]
+            )
+            biquadC[8] = biquadC[7]
+            biquadC[7] = sample
+            sample = outC
+            biquadC[10] = biquadC[9]
+            biquadC[9]  = sample
+
+            # Section D
+            outD = (
+                biquadD[2] * sample +
+                biquadD[3] * biquadD[7] +
+                biquadD[4] * biquadD[8] -
+                biquadD[5] * biquadD[9] -
+                biquadD[6] * biquadD[10]
+            )
+            biquadD[8] = biquadD[7]
+            biquadD[7] = sample
+            sample = outD
+            biquadD[10] = biquadD[9]
+            biquadD[9]  = sample
+
+            # Section E
+            outE = (
+                biquadE[2] * sample +
+                biquadE[3] * biquadE[7] +
+                biquadE[4] * biquadE[8] -
+                biquadE[5] * biquadE[9] -
+                biquadE[6] * biquadE[10]
+            )
+            biquadE[8] = biquadE[7]
+            biquadE[7] = sample
+            sample = outE
+            biquadE[10] = biquadE[9]
+            biquadE[9]  = sample
+
+            # 5.4) (Optional) 32-bit floating-point dither, like in Airwindows C++:
+            # expon = 0
+            # fpd ^= (fpd << 13); fpd ^= (fpd >> 17); fpd ^= (fpd << 5)
+            # sample += ((float(fpd) - 0x7fffffff) * 5.5e-36 * pow(2, expon+62))
+
+            # 5.5) Write the filtered sample back
+            EditorSample.SetSampleAt(n, c, sample)
+
+# Execute the infrasonic filter
+process_infrasonic()

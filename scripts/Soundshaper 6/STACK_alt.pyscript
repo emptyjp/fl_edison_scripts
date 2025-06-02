@@ -1,0 +1,103 @@
+from enveditor import *
+import math
+
+# === Pitch-shift helper: compute input index for given output index and semitone shift ===
+def get_shifted_index(out_idx, semitone_shift):
+    # ratio to map output index back to input index
+    ratio = 2 ** (semitone_shift / 12.0)
+    # use nearest lower integer (floor)
+    return int(math.floor(out_idx / ratio))
+
+# === Main Stack processing ===
+def process_stack(transpose, lean, propn, attack_offset, count, gain):
+    # 1) Determine selection range
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+    if x2 <= x1:
+        x1 = 0
+        x2 = EditorSample.Length - 1
+    length = x2 - x1 + 1
+    sample_rate = EditorSample.SampleRate
+
+    # 2) Calculate attack-time offset in samples (clamp to length-1)
+    offset_samples = min(int(attack_offset * sample_rate), length - 1)
+
+    # 3) Compute base segment to stack (from x1+offset to x2)
+    base_length = length - offset_samples
+    if base_length <= 0:
+        return  # nothing to process
+
+    # 4) Compute output length according to PROPN (0..1)
+    out_length = max(1, min(base_length, int(round(base_length * propn))))
+
+    # 5) Read original segment into a nested list [channel][sample]
+    original = [
+        [EditorSample.GetSampleAt(x1 + offset_samples + i, c) for i in range(base_length)]
+        for c in range(EditorSample.NumChans)
+    ]
+
+    # 6) Prepare accumulation buffer for stacked result
+    stacked = [[0.0 for _ in range(out_length)] for _ in range(EditorSample.NumChans)]
+
+    # 7) For each voice, compute amplitude and add pitch-shifted samples
+    for v in range(count):
+        # semitone shift for this voice: v * transpose
+        semitone_shift = v * transpose
+        # amplitude for this voice: LEAN^(v/(count-1))
+        if count > 1:
+            amp = lean ** (v / (count - 1))
+        else:
+            amp = 1.0
+
+        # For each output sample index i, find corresponding input index
+        for i in range(out_length):
+            in_idx = get_shifted_index(i, semitone_shift)
+            if in_idx < base_length:
+                for c in range(EditorSample.NumChans):
+                    stacked[c][i] += original[c][in_idx] * amp
+            # if in_idx >= base_length, add zero (silence) implicitly
+
+        Utils.ProgressMsg(f"Stacking voice {v+1}/{count}", v + 1, count)
+
+    # 8) Apply overall gain normalization
+    #    Note: To avoid excessive clipping, divide by sum of amps, then multiply by gain
+    total_amp = 0.0
+    for v in range(count):
+        if count > 1:
+            total_amp += lean ** (v / (count - 1))
+        else:
+            total_amp += 1.0
+    if total_amp <= 0.0:
+        total_amp = 1.0
+
+    # 9) Write back to buffer (truncated or zero-padded beyond out_length)
+    for i in range(out_length):
+        for c in range(EditorSample.NumChans):
+            # normalized and scaled
+            val = (stacked[c][i] / total_amp) * gain
+            EditorSample.SetSampleAt(x1 + i, c, val)
+
+    # Zero out remaining samples after out_length to avoid artifacts
+    for i in range(out_length, length):
+        for c in range(EditorSample.NumChans):
+            EditorSample.SetSampleAt(x1 + i, c, 0.0)
+
+# === Interface ===
+form = ScriptDialog("Stack", "Superimpose transposed copies of the selected audio. Inspired by SoundShaper 6.\n\nMade by D. Stativkin with ChatGPT. GitHub - emptyjp")
+
+form.AddInputKnob("TRANSPOSE",        0.0,  -60.0, 60.0)   # semitones
+form.AddInputKnob("LEAN",             1.0,   0.01, 100.0)  # ratio of highest to lowest
+form.AddInputKnob("PROPN",            1.0,   0.0,  1.0)    # proportion of duration to keep
+form.AddInputKnob("ATTACK-TIME",      0.0,   0.0,  27.861) # seconds
+form.AddInputKnob("COUNT",            2.0,   1.0,  32.0)   # number of voices
+form.AddInputKnob("GAIN",             1.0,   0.1,  10.0)   # overall gain
+
+if form.Execute():
+    transpose    = form.GetInputValue("TRANSPOSE")
+    lean         = form.GetInputValue("LEAN")
+    propn        = form.GetInputValue("PROPN")
+    attack_time  = form.GetInputValue("ATTACK-TIME")
+    count        = int(form.GetInputValue("COUNT"))
+    gain         = form.GetInputValue("GAIN")
+
+    process_stack(transpose, lean, propn, attack_time, count, gain)

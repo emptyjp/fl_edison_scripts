@@ -1,0 +1,48 @@
+from enveditor import *
+
+def clipper(threshold, outputGain):
+    # Получаем параметры выделения
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+
+    # Если нет выделения - обрабатываем весь семпл
+    if x2 <= x1:
+        x1 = 0
+        x2 = EditorSample.Length - 1
+
+    # Обрабатываем каждый сэмпл в выделенной области
+    for n in range(x1, x2 + 1):
+        # Обновляем прогресс-бар каждые 10000 сэмплов
+        if (n - x1) % 10000 == 0:
+            Utils.ProgressMsg("Clipping", n - x1, x2 - x1)
+
+        # Обрабатываем каждый канал
+        for c in range(EditorSample.NumChans):
+            # Получаем текущее значение сэмпла
+            val = EditorSample.GetSampleAt(n, c)
+
+            # Применяем хард-клиппинг
+            if val > threshold:
+                val = threshold
+            elif val < -threshold:
+                val = -threshold
+
+            # Применяем усиление
+            val *= outputGain
+
+            # Устанавливаем новое значение
+            EditorSample.SetSampleAt(n, c, val)
+
+# Создаем диалог с настройками
+form = ScriptDialog("Hard Clipper", "Hard clip selected audio with adjustable threshold and gain. GitHub - emptyjp")
+form.AddInputKnob("Threshold", 0.8, 0.01, 1.0)       # Порог клиппинга (от 0.01 до 1.0)
+form.AddInputKnob("Output Gain", 1.0, 0.1, 4.0)       # Усиление (от 0.1x до 4.0x)
+
+# Показываем диалог и обрабатываем результат
+if form.Execute():
+    # Получаем значения из диалога
+    threshold = form.GetInputValue("Threshold")
+    gain = form.GetInputValue("Output Gain")
+
+    # Вызываем функцию клиппера
+    clipper(threshold, gain)
