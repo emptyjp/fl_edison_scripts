@@ -2,13 +2,13 @@ from enveditor import *
 import math
 
 # ===========================
-# ASA-6A Calibrated Vari-Mu Compressor with BAL-Limit, Bass, Dry/Wet
+# ASA-6A Vari-Mu Compressor with Attack/Release & BAL-Limit
 # ===========================
-def process_asa6a_calibrated(x1, x2, fs,
-                             in_gain_db, out_gain_db,
-                             nfb_mode, hpf_mode,
-                             bass_mode, dry_wet,
-                             bal_mode):
+def process_asa6a(x1, x2, fs,
+                  in_gain_db, out_gain_db,
+                  nfb_mode, hpf_mode,
+                  bass_mode, dry_wet,
+                  attack_sec, release_sec, bal_mode):
     """
     x1, x2         : start/end sample indices (Editor.SelectionStartS, SelectionEndS)
     fs             : EditorSample.SampleRate
@@ -18,6 +18,8 @@ def process_asa6a_calibrated(x1, x2, fs,
     hpf_mode       : 0=Stock, 1=120Hz sidechain HPF
     bass_mode      : 0=Off, 1=Original LPF, 2=Trimmed LPF
     dry_wet        : 0.0..1.0 (0 = dry, 1 = wet)
+    attack_sec     : user‐set attack time in seconds
+    release_sec    : user‐set release time in seconds
     bal_mode       : 0=Off, 1=Single, 2=Dual
     """
     num_chans = 1
@@ -30,30 +32,36 @@ def process_asa6a_calibrated(x1, x2, fs,
 
     # Sidechain HPF at 120 Hz
     if hpf_mode == 1:
-        cutoff = 120.0
-        RC_hpf = 1.0 / (2 * math.pi * cutoff)
+        cutoff_hpf = 120.0
+        RC_hpf = 1.0 / (2 * math.pi * cutoff_hpf)
         hpf_bc = RC_hpf / (RC_hpf + (1.0/fs))
     else:
-        hpf_bc = 0.0  # bypass
+        hpf_bc = 0.0
 
-    # Envelope follower constants based on BAL-Limit
-    if bal_mode == 1:  # Single: fast attack, default release
-        attack_time  = 0.0002  # ~0.2 ms (very fast)
-        release_time = 0.2     # 200 ms
-    elif bal_mode == 2:  # Dual: default attack, slow release
-        attack_time  = 0.002   # 2 ms
-        release_time = 1.0     # 1 second
-    else:  # Off: bypass compression
-        attack_time  = 0.001   # any placeholder
-        release_time = 0.2
+    # Determine effective attack & release based on BAL-Limit
+    # BAL Off: normal attack_sec & release_sec
+    # BAL Single: force attack to fastest (0.0001), let release = release_sec
+    # BAL Dual: force release to slowest (1.0), let attack = attack_sec
+    if bal_mode == 1:  # Single
+        eff_attack = 0.0001
+        eff_release = release_sec
+        bypass_comp = False
+    elif bal_mode == 2:  # Dual
+        eff_attack = attack_sec
+        eff_release = 1.0
+        bypass_comp = False
+    else:  # Off
+        eff_attack = attack_sec
+        eff_release = release_sec
+        bypass_comp = True
 
-    alpha_a = math.exp(-1.0 / (fs * max(1e-6, attack_time)))
-    alpha_r = math.exp(-1.0 / (fs * max(1e-6, release_time)))
+    alpha_a = math.exp(-1.0 / (fs * max(1e-6, eff_attack)))
+    alpha_r = math.exp(-1.0 / (fs * max(1e-6, eff_release)))
 
     # 6H6 rectifier “soft knee”
     diode_vd = 0.1
 
-    # 5R4 sag time constant
+    # 5R4 sag
     sag_tc = 0.8
     alpha_sag = math.exp(-1.0 / (fs * sag_tc))
 
@@ -61,7 +69,7 @@ def process_asa6a_calibrated(x1, x2, fs,
     G0_6sk7 = 12.0
     k_6sk7  = 0.25
 
-    # Drive constants (reduced)
+    # Drive constants
     drive_tf_input   = 0.3
     drive_tf_interst = 0.25
     drive_6sk7_2     = 0.6
@@ -79,13 +87,10 @@ def process_asa6a_calibrated(x1, x2, fs,
     RC_bass = 1.0 / (2 * math.pi * bass_cutoff)
     bass_alpha = RC_bass / (RC_bass + (1.0/fs))
 
-    # NFB (Drive) +5 dB front gain
+    # NFB Drive +5 dB
     front_gain = 1.0
     if nfb_mode == 1:
         front_gain = 10 ** (5.0 / 20.0)
-
-    # Determine if compression is bypassed
-    bypass_comp = (bal_mode == 0)
 
     # --- 2) STATE VARIABLES --- #
     sc_hpf_prev    = 0.0
@@ -102,27 +107,23 @@ def process_asa6a_calibrated(x1, x2, fs,
     EditorSample.NumChans = 1
     EditorSample.Length = x1 + full_len
 
-    # --- 4) MAIN SAMPLE LOOP --- #
+    # --- 4) PROCESS LOOP --- #
     for i in range(full_len):
         idx = x1 + i
         x_orig = EditorSample.GetSampleAt(idx, 0)
 
-        # STORE original for dry or bass processing
         x_dry = x_orig
-
-        # Apply input trim
         x0 = x_orig * in_gain
 
-        # A) Input Transformer (soft LF saturate)
+        # A) Input Transformer (soft LF)
         tf_in_lpf = tf_alpha * tf_in_lpf + (1 - tf_alpha) * x0
         y_in_lf   = tf_in_lpf
         y_in_hf   = x0 - y_in_lf
         y_in_lf_sat = math.atan(drive_tf_input * y_in_lf) * (2.0 / math.pi)
         x1s = (y_in_lf_sat + y_in_hf) * front_gain
 
-        # B) Envelope & 6H6 for compression (skip if bypass)
+        # B) Envelope & 6H6 (skip if bypass)
         if not bypass_comp:
-            # Sidechain HPF
             if hpf_mode == 1:
                 hp = hpf_bc * (sc_hpf_prev + x1s - sc_input_prev)
                 sc_input_prev = x1s
@@ -131,7 +132,6 @@ def process_asa6a_calibrated(x1, x2, fs,
             else:
                 x_sc = x1s
 
-            # 6H6 “soft diode” rectification
             if x_sc > diode_vd:
                 rectified = x_sc - diode_vd
             elif x_sc < -diode_vd:
@@ -147,76 +147,73 @@ def process_asa6a_calibrated(x1, x2, fs,
 
             sag_state = alpha_sag * sag_state + (1 - alpha_sag) * (1.0 - min(env * 5.0, 1.0))
 
-            # C) Tube Stage 1: 6SK7 #1 (Vari-Mu)
+            # C) 6SK7 #1
             G1 = G0_6sk7 / (1.0 + k_6sk7 * env)
             G1 *= sag_state
             x2s = math.atan(G1 * x1s) * (2.0 / math.pi)
         else:
-            # Bypass compression: skip to next stage
             x2s = x1s
 
-        # D) Interstage Transformer #1 (soft LF)
+        # D) Interstage Transformer #1
         tf_is_lpf_1 = tf_alpha * tf_is_lpf_1 + (1 - tf_alpha) * x2s
         y_is_lf_1 = tf_is_lpf_1
         y_is_hf_1 = x2s - y_is_lf_1
         y_is_lf_1_sat = math.atan(drive_tf_interst * y_is_lf_1) * (2.0 / math.pi)
         x3s = y_is_lf_1_sat + y_is_hf_1
 
-        # E) Tube Stage 2: 6SK7 #2 (Fixed, Gentle)
+        # E) 6SK7 #2
         G2 = 6.0 * sag_state if not bypass_comp else 1.0
         x4s = math.atan(drive_6sk7_2 * G2 * x3s) * (2.0 / math.pi)
 
-        # F) Coupling Transformer (soft LF)
+        # F) Coupling Transformer
         tf_is_lpf_2 = tf_alpha * tf_is_lpf_2 + (1 - tf_alpha) * x4s
         y_is_lf_2 = tf_is_lpf_2
         y_is_hf_2 = x4s - y_is_lf_2
         y_is_lf_2_sat = math.atan(drive_tf_interst * 0.35 * y_is_lf_2) * (2.0 / math.pi)
         x5s = y_is_lf_2_sat + y_is_hf_2
 
-        # G) Tube Stage 3: 6J7 #1 (Driver)
+        # G) 6J7 #1
         G3 = 5.0 * sag_state if not bypass_comp else 1.0
         x6s = math.atan(drive_6j7 * G3 * x5s) * (2.0 / math.pi)
 
-        # H) Tube Stage 4: 6J7 #2 (Driver)
+        # H) 6J7 #2
         G4 = 5.0 * sag_state if not bypass_comp else 1.0
         x7s = math.atan(drive_6j7 * G4 * x6s) * (2.0 / math.pi)
 
-        # I) 6V6 Push-Pull Output Stage
+        # I) 6V6 Output Stage
         G5 = 2.0 * sag_state if not bypass_comp else 1.0
         y5 = math.atan(drive_6v6 * G5 * x7s) * (2.0 / math.pi)
         even_bias = 0.005
         y5_even = abs(y5) * y5
         x8s = (1 - even_bias) * y5 + even_bias * y5_even
 
-        # J) Output Transformer (gentle LF saturate)
+        # J) Output Transformer
         tf_out_lpf = tf_alpha * tf_out_lpf + (1 - tf_alpha) * x8s
         y_out_lf = tf_out_lpf
         y_out_hf = x8s - y_out_lf
         y_out_lf_sat = math.atan(drive_tf_output * 0.25 * y_out_lf) * (2.0 / math.pi)
         x9s = y_out_lf_sat + y_out_hf
 
-        # K) Bass Preservation Modes
+        # K) Bass Preservation
         bass_comp = 0.0
         if bass_mode == 1:
-            # Original LPF: LPF on dry original
             bass_lpf_state = bass_alpha * bass_lpf_state + (1 - bass_alpha) * x_dry
             bass_comp = bass_lpf_state
         elif bass_mode == 2:
-            # Trimmed LPF: LPF on trimmed signal (x0)
             bass_lpf_state = bass_alpha * bass_lpf_state + (1 - bass_alpha) * x0
             bass_comp = bass_lpf_state
 
-        # L) Mix Dry/Wet + Bass Compensation
+        # L) Mix Dry/Wet + Bass
         proc = x9s + bass_comp
         out_s = dry_wet * proc + (1 - dry_wet) * x_dry
 
-        # M) Apply output gain and write back
+        # M) Write Back
         x_final = out_s * out_gain
         EditorSample.SetSampleAt(idx, 0, x_final)
 
         Utils.ProgressMsg("ASA-6A Calibrated", i+1, full_len)
 
-    # --- 5) FINAL NORMALIZATION --- #
+    # --- 5) NORMALIZE --- #
     peak = 0.0
     for i in range(full_len):
         s = abs(EditorSample.GetSampleAt(x1 + i, 0))
@@ -235,27 +232,32 @@ def process_asa6a_calibrated(x1, x2, fs,
 form = ScriptDialog(
     "ASA-6A Calibrated Vari-Mu Compressor",
     "Nine-tube, multi-transformer emulation with trim, bass preservation,\n"
-    "dry/wet blend, and BAL-Limit modes.\n\n"
+    "dry/wet blend, adjustable attack/release, and BAL-Limit modes.\n\n"
     "IN TRIM (dB):      adjust input level (e.g. -12 dB).\n"
     "OUT TRIM (dB):     makeup gain after processing.\n"
     "NFB (Drive):       0=Stock, 1=Drive (+5 dB pre-gain).\n"
     "SC-HPF:            0=Stock, 1=120 Hz sidechain HPF.\n"
     "Bass Mode:         0=Off, 1=Original LPF, 2=Trimmed LPF.\n"
     "Dry/Wet:           0.0..1.0 (0 = dry, 1 = wet).\n"
-    "BAL-Limit:         0=Off, 1=Single, 2=Dual.\n"
-    " - Off: bypass compression, still passes tubes & transformers.\n"
-    " - Single: very fast attack, default release.\n"
-    " - Dual: default attack, very slow release.\n\n"
-    "Uses arctan for ultra-smooth saturation and a gentle tube tone.\n\nMade by D. Stativkin with love.\nhttps://github.com/emptyjp/fl_edison_scripts"
+    "ATTACK (sec):      0.0001 (fast) … 0.05 (slow).\n"
+    "RELEASE (sec):     0.05 (fast) … 1.0 (slow).\n"
+    "BAL-Limit:         0=Off, 1=Single (very fast attack),\n"
+    "                   2=Dual (very slow release).\n"
+    " - Off: bypass compression; tubes & transformers still active.\n"
+    " - Single: attack forced very fast; release = chosen value.\n"
+    " - Dual: release forced very slow; attack = chosen value.\n"
+    "Uses arctan for ultra-smooth saturation."
 )
 
-form.AddInputKnob("IN TRIM (dB)",   -12.0, -48.0,  0.0)
-form.AddInputKnob("OUT TRIM (dB)",    0.0, -12.0, 12.0)
-form.AddInputCombo("NFB",      ["Stock","Drive"],      0)
-form.AddInputCombo("SC-HPF",   ["Stock","120 Hz"],      0)
-form.AddInputCombo("Bass Mode",["Off","Original LPF","Trimmed LPF"], 0)
-form.AddInputKnob("Dry/Wet",     1.0,   0.0,     1.0)
-form.AddInputCombo("BAL-Limit", ["Off","Single","Dual"], 1)
+form.AddInputKnob("IN TRIM (dB)",    -12.0,  -48.0,  0.0)
+form.AddInputKnob("OUT TRIM (dB)",     0.0,  -12.0, 12.0)
+form.AddInputCombo("NFB",       ["Stock","Drive"],      0)
+form.AddInputCombo("SC-HPF",    ["Stock","120 Hz"],      0)
+form.AddInputCombo("Bass Mode", ["Off","Original LPF","Trimmed LPF"], 0)
+form.AddInputKnob("Dry/Wet",      1.0,    0.0,     1.0)
+form.AddInputKnob("ATTACK (sec)", 0.002,  0.0001,  0.05)
+form.AddInputKnob("RELEASE (sec)",0.2,    0.05,    1.0)
+form.AddInputCombo("BAL-Limit",  ["Off","Single","Dual"], 1)
 
 if form.Execute():
     start_idx   = Editor.SelectionStartS
@@ -267,9 +269,11 @@ if form.Execute():
     hpf_flag    = int(form.GetInputValue("SC-HPF"))
     bass_flag   = int(form.GetInputValue("Bass Mode"))
     dry_wet_val = form.GetInputValue("Dry/Wet")
+    attack_sec  = form.GetInputValue("ATTACK (sec)")
+    release_sec = form.GetInputValue("RELEASE (sec)")
     bal_flag    = int(form.GetInputValue("BAL-Limit"))
-    process_asa6a_calibrated(start_idx, end_idx, fs,
-                             in_db, out_db,
-                             nfb_flag, hpf_flag,
-                             bass_flag, dry_wet_val,
-                             bal_flag)
+    process_asa6a(start_idx, end_idx, fs,
+                  in_db, out_db,
+                  nfb_flag, hpf_flag,
+                  bass_flag, dry_wet_val,
+                  attack_sec, release_sec, bal_flag)
