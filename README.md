@@ -7,7 +7,7 @@ I'm not that much of a plug-in developer, but, I certainly love experimentation.
 ## How to install these???
 
 Simple. Just get scripts folder, then, put all the files in:
-C:\Users\%UserProfile%\Documents\Image-Line\FL Studio\Settings\Audio scripts
+C:\Users\\%UserProfile%\Documents\Image-Line\FL Studio\Settings\Audio scripts
 
 You can make a separate folder for my scripts and name it "emptyjp".
 
