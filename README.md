@@ -20,3 +20,10 @@ Aaaand, it'll be **right there!**
 ![Audioscape ASA-6A](/img/asa6a.png?raw=true "Audioscape ASA-6A")
 
 Yeah, this is, like, the best thing I've ever created. It's cool.
+It emulates every single tube & transformer stage in the OG Audioscape compressor.
+
+### Hall of fame:
+
+* Asymmetrical Advanced Soft-Clipper with a RMS Envelope Restore function.
+
+* Broken toy frequency shifter.
