@@ -18,14 +18,8 @@ Aaaand, it'll be **right there!**
 
 ## Creations that I'm most proud of:
 
-### Audioscape ASA-6A: nine-tube, multi-transformer emulation with trim, bass preservation.
-![Audioscape ASA-6A](/img/asa6a.png?raw=true "Audioscape ASA-6A")
-
-Yeah, this is, like, the best thing I've ever created. It's cool.
-It emulates every single tube & transformer stage in the OG Audioscape compressor. Sounds nothing like the original, though, but I'm working on it.
-
-### Hall of fame:
-
 * Asymmetrical Advanced Soft-Clipper with a RMS Envelope Restore function.
 
 * Broken toy frequency shifter.
+
+* Tubeopath
