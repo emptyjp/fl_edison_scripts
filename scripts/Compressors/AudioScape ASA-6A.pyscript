@@ -246,7 +246,7 @@ form = ScriptDialog(
     " - Off: bypass compression; tubes & transformers still active.\n"
     " - Single: attack forced very fast; release = chosen value.\n"
     " - Dual: release forced very slow; attack = chosen value.\n"
-    "Uses arctan for ultra-smooth saturation."
+    "Uses arctan for ultra-smooth saturation.\n\nMade by D. Stativkin with love.\nhttps://github.com/emptyjp/fl_edison_scripts"
 )
 
 form.AddInputKnob("IN TRIM (dB)",    -12.0,  -48.0,  0.0)
