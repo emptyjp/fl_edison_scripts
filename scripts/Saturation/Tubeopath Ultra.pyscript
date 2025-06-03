@@ -1,0 +1,496 @@
+from enveditor import *
+import math
+
+# ===========================
+# Tubeopath Ultra – Up-to-100-stages (!) Saturator with Cascaded Stage EQ, Low Preserve & Optimized Oversampling (Stereo)
+# From two to a hundred cascaded saturation stages, each preceded by a bell EQ stage to boost a chosen frequency.
+# Optionally preserve sub-bass below a cutoff, snap EQ to 808 C-note harmonics,
+# and apply oversampling for cleaner processing—optimized so 1× path uses native loop.
+# Selectable saturation curves per stage. Supports mono or stereo.
+# Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
+# ===========================
+
+def apply_curve(v, curve_index):
+    """
+    v            : input sample to nonlinearity
+    curve_index  : selects which curve to use
+      0 = Atan (normalized)
+      1 = Tanh
+      2 = Sin
+      3 = Exp
+      4 = Log
+      5 = Arctangent (raw)
+      6 = Smoothstep
+      7 = Softclip
+      8 = Hardclip
+      9 = Foldback
+    Returns nonlinear output y.
+    """
+    if curve_index == 0:
+        # Atan normalized to [-1..1]
+        return math.atan(v) * (2.0 / math.pi)
+    elif curve_index == 1:
+        # Tanh
+        return math.tanh(v)
+    elif curve_index == 2:
+        # Sin (approx soft)
+        return math.sin(v)
+    elif curve_index == 3:
+        # Exp soft clip: sign(v)*(1 - exp(-|v|))
+        return math.copysign(1.0 - math.exp(-abs(v)), v)
+    elif curve_index == 4:
+        # Log soft clip: sign(v)*log1p(|v|)
+        return math.copysign(math.log1p(abs(v)), v)
+    elif curve_index == 5:
+        # Arctangent raw (not normalized)
+        return math.atan(v)
+    elif curve_index == 6:
+        # Smoothstep: clamp v to [-1,1], then smooth
+        t = max(min((v + 1) / 2.0, 1.0), 0.0)
+        s = t * t * (3 - 2 * t)
+        return 2 * s - 1
+    elif curve_index == 7:
+        # Softclip: x/(1+|x|)
+        return v / (1 + abs(v))
+    elif curve_index == 8:
+        # Hardclip: clamp to [-1,1]
+        return max(-1.0, min(1.0, v))
+    elif curve_index == 9:
+        # Foldback: if |v| <= 1, pass; else fold
+        abs_v = abs(v)
+        if abs_v <= 1.0:
+            return v
+        else:
+            fb = math.fmod(abs_v - 1.0, 2.0)
+            if fb > 1.0:
+                fb = 2.0 - fb
+            return math.copysign(fb, v)
+    else:
+        # Default fall-back: Atan normalized
+        return math.atan(v) * (2.0 / math.pi)
+
+def process_tubeopath(x1, x2, fs,
+                      drive, stage_factor, stage_mode,
+                      eq_freq_knob, eq_q, eq_gain_db,
+                      use_c_harm, preserve_lows, preserve_freq,
+                      tone_freq, dry_wet,
+                      os_index, curve_index):
+    """
+    x1, x2         : selection start/end (samples)
+    fs             : sample rate
+    drive          : base pre-saturation gain (0.1 … 10.0)
+    stage_factor   : incremental gain factor per tube stage (0.001 … 1.0)
+    stage_mode     : index selecting number of stages [0→1,1→2,2→5,3→10,4→20,5→100]
+    eq_freq_knob   : EQ frequency from knob (3 … 20000 Hz)
+    eq_q           : Q factor for bell EQ (0.1 … 10)
+    eq_gain_db     : gain of bell EQ per stage in dB (-24 … +24)
+    use_c_harm     : 0=Off, 1=1st (32.703 Hz), 2=2nd (65.406 Hz), 3=3rd (97.999 Hz), 4=4th (130.81 Hz)
+    preserve_lows  : 0=No, 1=Yes
+    preserve_freq  : cutoff freq for low preservation (3 … 200 Hz)
+    tone_freq      : post-saturation LPF cutoff (100 … 20000 Hz)
+    dry_wet        : 0.0..1.0 (0=dry, 1=fully wet)
+    os_index       : index from oversample combo (0=1×,1=2×,2=4×,3=8×,4=16×,5=MAX)
+    curve_index    : selects saturation curve (0=Atan,1=Tanh,…,9=Foldback)
+    """
+    # Utils.ShowMessage(f"Stage mode: {stage_mode}")
+    # Determine oversample factor
+    if os_index == 0:
+        factor = 1
+    elif os_index == 1:
+        factor = 2
+    elif os_index == 2:
+        factor = 4
+    elif os_index == 3:
+        factor = 8
+    elif os_index == 4:
+        factor = 16
+    else:
+        factor = 32  # MAX
+
+    # Decide actual EQ frequency
+    if use_c_harm == 1:
+        eq_freq = 32.703
+    elif use_c_harm == 2:
+        eq_freq = 65.406
+    elif use_c_harm == 3:
+        eq_freq = 97.999
+    elif use_c_harm == 4:
+        eq_freq = 130.81
+    else:
+        eq_freq = max(3.0, min(eq_freq_knob, 20000.0))
+
+    stage_count = [1, 2, 5, 10, 20,100]
+
+    # Determine mono or stereo
+    chans = EditorSample.NumChans if EditorSample.NumChans in (1, 2) else 1
+    length = x2 - x1 + 1
+
+    # Precompute peaking EQ coefficients (Cookbook), but at base rate
+    A    = 10 ** (eq_gain_db / 40.0)
+    w0   = 2 * math.pi * eq_freq / fs
+    cos0 = math.cos(w0)
+    sin0 = math.sin(w0)
+    alpha = sin0 / (2 * eq_q)
+
+    b0 = (1 + alpha * A) / (1 + alpha / A)
+    b1 = (-2 * cos0) / (1 + alpha / A)
+    b2 = (1 - alpha * A) / (1 + alpha / A)
+    a1 = (-2 * cos0) / (1 + alpha / A)
+    a2 = (1 - alpha / A) / (1 + alpha / A)
+
+    # Precompute split‐LPF and tone‐LPF coefficients at base rate; will reuse for 1× path
+    # Split LPF at preserve_freq
+    if preserve_lows == 1:
+        split_c = max(3.0, min(preserve_freq, 200.0))
+        RC_s  = 1.0 / (2 * math.pi * split_c)
+        alpha_split_base = RC_s / (RC_s + (1.0 / fs))
+    else:
+        alpha_split_base = 0.0
+
+    # Tone LPF at tone_freq
+    t_c = max(100.0, min(tone_freq, 20000.0))
+    RC_t = 1.0 / (2 * math.pi * t_c)
+    alpha_tone_base = RC_t / (RC_t + (1.0 / fs))
+
+    # Build stage gains
+    stage_gains = [drive * (1.0 + stage_factor * i) for i in range(stage_count[stage_mode])]
+
+    # Read input & measure peak_in
+    orig = []
+    peak_in = 0.0
+    for i in range(length):
+        if chans == 1:
+            s = EditorSample.GetSampleAt(x1 + i, 0)
+            orig.append((s,))
+            peak_in = max(peak_in, abs(s))
+        else:
+            L = EditorSample.GetSampleAt(x1 + i, 0)
+            R = EditorSample.GetSampleAt(x1 + i, 1)
+            orig.append((L, R))
+            peak_in = max(peak_in, abs(L), abs(R))
+    peak_in = peak_in or 1.0
+
+    # If factor == 1, use the optimized single‐rate loop to avoid overhead
+    if factor == 1:
+        # State variables per channel
+        split_lpf = [0.0] * chans
+        tone_lpf  = [0.0] * chans
+
+        # EQ states: for each of 10 stages and each channel, keep x1,x2,y1,y2
+        eq_x1 = [[0.0]*chans for _ in range(stage_count[stage_mode])]
+        eq_x2 = [[0.0]*chans for _ in range(stage_count[stage_mode])]
+        eq_y1 = [[0.0]*chans for _ in range(stage_count[stage_mode])]
+        eq_y2 = [[0.0]*chans for _ in range(stage_count[stage_mode])]
+
+        # Output buffer
+        proc = [ (0.0,0.0) for _ in range(length) ] if chans == 2 else [0.0] * length
+
+        for i in range(length):
+            # Unpack
+            if chans == 1:
+                xL = orig[i][0]
+                xR = 0.0
+                dryL = xL
+                dryR = 0.0
+            else:
+                xL, xR = orig[i]
+                dryL = xL
+                dryR = xR
+
+            outL = 0.0
+            outR = 0.0
+
+            for ch, x in enumerate((xL, xR)[:chans]):
+                # 1) Split LPF if enabled
+                if preserve_lows == 1:
+                    split_lpf[ch] = alpha_split_base * split_lpf[ch] + (1 - alpha_split_base) * x
+                    y_lf = split_lpf[ch]
+                    y_hf = x - y_lf
+                else:
+                    y_lf = 0.0
+                    y_hf = x
+
+                # 2) Cascaded 10‐stage: EQ then Tube saturation
+                y = y_hf
+
+                for stage in range(stage_count[stage_mode]):
+                    # Peaking EQ (Cookbook)
+                    xn = y
+                    yn = (b0 * xn +
+                          b1 * eq_x1[stage][ch] +
+                          b2 * eq_x2[stage][ch] -
+                          a1 * eq_y1[stage][ch] -
+                          a2 * eq_y2[stage][ch])
+                    # shift states
+                    eq_x2[stage][ch] = eq_x1[stage][ch]
+                    eq_x1[stage][ch] = xn
+                    eq_y2[stage][ch] = eq_y1[stage][ch]
+                    eq_y1[stage][ch] = yn
+
+                    # Tube saturation
+                    y = apply_curve(stage_gains[stage] * yn, curve_index)
+
+                y_comb = y_lf + y
+
+                # 3) Tone LPF
+                tone_lpf[ch] = alpha_tone_base * tone_lpf[ch] + (1 - alpha_tone_base) * y_comb
+                y_tone = tone_lpf[ch]
+
+                if ch == 0:
+                    outL = y_tone
+                else:
+                    outR = y_tone
+
+            # 4) Dry/Wet mix
+            if chans == 1:
+                mixed = dry_wet * outL + (1 - dry_wet) * dryL
+                proc[i] = mixed
+            else:
+                mixedL = dry_wet * outL + (1 - dry_wet) * dryL
+                mixedR = dry_wet * outR + (1 - dry_wet) * dryR
+                proc[i] = (mixedL, mixedR)
+
+        # 5) Normalize & write back
+        if chans == 1:
+            peak_out = max(abs(v) for v in proc) or 1.0
+            norm = peak_in / peak_out
+            for i in range(length):
+                EditorSample.SetSampleAt(x1 + i, 0, proc[i] * norm)
+                Utils.ProgressMsg("Tubeopath Stage EQ OS (Mono)", i+1, length)
+            EditorSample.NumChans = 1
+        else:
+            peak_out = 0.0
+            for (L, R) in proc:
+                peak_out = max(peak_out, abs(L), abs(R))
+            peak_out = peak_out or 1.0
+            norm = peak_in / peak_out
+            for i in range(length):
+                L, R = proc[i]
+                EditorSample.SetSampleAt(x1 + i, 0, L * norm)
+                EditorSample.SetSampleAt(x1 + i, 1, R * norm)
+                Utils.ProgressMsg("Tubeopath Stage EQ OS (Stereo)", i+1, length)
+            EditorSample.NumChans = 2
+
+        return  # done with 1× path
+
+    # --- Oversampled Path (factor > 1) --- #
+    fs_os = fs * factor
+
+    # Recompute split LPF and tone LPF coefficients at fs_os
+    if preserve_lows == 1:
+        split_c = max(3.0, min(preserve_freq, 200.0))
+        RC_s  = 1.0 / (2 * math.pi * split_c)
+        alpha_split = RC_s / (RC_s + (1.0 / fs_os))
+    else:
+        alpha_split = 0.0
+
+    t_c = max(100.0, min(tone_freq, 20000.0))
+    RC_t = 1.0 / (2 * math.pi * t_c)
+    alpha_tone = RC_t / (RC_t + (1.0 / fs_os))
+
+    # Recompute EQ coefficients at fs_os
+    w0_os = 2 * math.pi * eq_freq / fs_os
+    cos0_os = math.cos(w0_os)
+    sin0_os = math.sin(w0_os)
+    alpha_os = sin0_os / (2 * eq_q)
+
+    b0_os = (1 + alpha_os * A) / (1 + alpha_os / A)
+    b1_os = (-2 * cos0_os) / (1 + alpha_os / A)
+    b2_os = (1 - alpha_os * A) / (1 + alpha_os / A)
+    a1_os = (-2 * cos0_os) / (1 + alpha_os / A)
+    a2_os = (1 - alpha_os / A) / (1 + alpha_os / A)
+
+    # Build upsampled buffers
+    length_up = length * factor
+    if chans == 1:
+        orig_up = [0.0] * length_up
+        for i in range(length):
+            v = orig[i][0]
+            for k in range(factor):
+                orig_up[i * factor + k] = v
+    else:
+        orig_up = [ (0.0,0.0) ] * length_up
+        for i in range(length):
+            L, R = orig[i]
+            for k in range(factor):
+                orig_up[i * factor + k] = (L, R)
+
+    # State for oversampled path
+    split_lpf = [0.0]*chans
+    tone_lpf  = [0.0]*chans
+    eq_x1 = [[0.0]*chans for _ in range(stage_count[stage_mode])]
+    eq_x2 = [[0.0]*chans for _ in range(stage_count[stage_mode])]
+    eq_y1 = [[0.0]*chans for _ in range(stage_count[stage_mode])]
+    eq_y2 = [[0.0]*chans for _ in range(stage_count[stage_mode])]
+
+    # Upsampled output
+    if chans == 1:
+        proc_up = [0.0] * length_up
+        for j in range(length_up):
+            x_val = orig_up[j]
+            # Split LPF if enabled
+            if preserve_lows == 1:
+                split_lpf[0] = alpha_split * split_lpf[0] + (1 - alpha_split) * x_val
+                y_lf = split_lpf[0]
+                y_hf = x_val - y_lf
+            else:
+                y_lf = 0.0
+                y_hf = x_val
+
+            # Cascaded 10-stage
+            y = y_hf
+            for stage in range(stage_count[stage_mode]):
+                xn = y
+                yn = (b0_os * xn +
+                      b1_os * eq_x1[stage][0] +
+                      b2_os * eq_x2[stage][0] -
+                      a1_os * eq_y1[stage][0] -
+                      a2_os * eq_y2[stage][0])
+                eq_x2[stage][0] = eq_x1[stage][0]
+                eq_x1[stage][0] = xn
+                eq_y2[stage][0] = eq_y1[stage][0]
+                eq_y1[stage][0] = yn
+                y = apply_curve(stage_gains[stage] * yn, curve_index)
+            y_comb = y_lf + y
+
+            # Tone LPF
+            tone_lpf[0] = alpha_tone * tone_lpf[0] + (1 - alpha_tone) * y_comb
+            proc_up[j] = tone_lpf[0]
+
+        # Downsample
+        proc = [0.0] * length
+        for i in range(length):
+            proc[i] = proc_up[i * factor]
+
+    else:
+        proc_up = [ (0.0, 0.0) ] * length_up
+        for j in range(length_up):
+            L_in, R_in = orig_up[j]
+            for ch, x_val in enumerate((L_in, R_in)):
+                # Split LPF
+                if preserve_lows == 1:
+                    split_lpf[ch] = alpha_split * split_lpf[ch] + (1 - alpha_split) * x_val
+                    y_lf = split_lpf[ch]
+                    y_hf = x_val - y_lf
+                else:
+                    y_lf = 0.0
+                    y_hf = x_val
+                y = y_hf
+                for stage in range(stage_count[stage_mode]):
+                    xn = y
+                    yn = (b0_os * xn +
+                          b1_os * eq_x1[stage][ch] +
+                          b2_os * eq_x2[stage][ch] -
+                          a1_os * eq_y1[stage][ch] -
+                          a2_os * eq_y2[stage][ch])
+                    eq_x2[stage][ch] = eq_x1[stage][ch]
+                    eq_x1[stage][ch] = xn
+                    eq_y2[stage][ch] = eq_y1[stage][ch]
+                    eq_y1[stage][ch] = yn
+                    y = apply_curve(stage_gains[stage] * yn, curve_index)
+                y_comb = y_lf + y
+                tone_lpf[ch] = alpha_tone * tone_lpf[ch] + (1 - alpha_tone) * y_comb
+                if ch == 0:
+                    outL = tone_lpf[0]
+                else:
+                    outR = tone_lpf[1]
+            proc_up[j] = (outL, outR)
+
+        # Downsample
+        proc = [ (0.0,0.0) ] * length
+        for i in range(length):
+            proc[i] = proc_up[i * factor]
+
+    # --- Normalize & write back ---
+    if chans == 1:
+        peak_out = max(abs(v) for v in proc) or 1.0
+        norm = peak_in / peak_out
+        for i in range(length):
+            val = proc[i] * norm
+            EditorSample.SetSampleAt(x1 + i, 0, val)
+            Utils.ProgressMsg("Tubeopath Stage EQ OS (Mono)", i+1, length)
+        EditorSample.NumChans = 1
+    else:
+        peak_out = 0.0
+        for (L, R) in proc:
+            peak_out = max(peak_out, abs(L), abs(R))
+        peak_out = peak_out or 1.0
+        norm = peak_in / peak_out
+        for i in range(length):
+            L, R = proc[i]
+            EditorSample.SetSampleAt(x1 + i, 0, L * norm)
+            EditorSample.SetSampleAt(x1 + i, 1, R * norm)
+            Utils.ProgressMsg("Tubeopath Stage EQ OS (Stereo)", i+1, length)
+        EditorSample.NumChans = 2
+
+
+# ============================
+# ===   E D I S O N   S C R I P T   ===
+# ============================
+form = ScriptDialog(
+    "Tubeopath Ultra – 100-anything (!) Saturator w/ Stage EQ",
+    "Ten cascaded tube/distortion stages with a bell EQ before each tube stage.\n"
+    "Creates psychoacoustic ‘cascade emphasis’—especially rich on 3rd harmonics.\n"
+    "With C-tuned 808s, I recommend using C Harmonic Frequencies on the EQ:\n"
+    "1st: 32.703 Hz, 2nd: 65.406 Hz, 3rd: 97.999 Hz, 4th: 130.81 Hz\n"
+    "Can also create hectic ringing. Overall great for noisy stuff.\n"
+    "If you're a harsh-noise or noisecore producer, this is for you.\n"
+    "Can preserve sub-bass, applies tone control, and supports dry/wet blending.\n"
+    "Works on mono or stereo selections.\n\n"
+    "DRIVE:          base pre-saturation gain (0.1 … 10.0).\n"
+    "STAGE FACTOR:   incremental gain per tube stage (0.001 … 1.0).\n"
+    "STAGE MODE:     determines how many stages Tubeopath goes through (1,2,5,10,20,100)\n"
+    "EQ FREQ:        bell center frequency (3 … 20000 Hz).\n"
+    "EQ Q:           Q factor (0.1 … 10).\n"
+    "EQ GAIN:        gain of bell per stage in dB (-24 … +24).\n"
+    "USE C HARM:     Off/1st/2nd/3rd/4th  (32.703,65.406,97.999,130.81 Hz).\n"
+    "PRESERVE LOWS:  Off/Yes – keep everything below “Preserve Freq” unprocessed.\n"
+    "PRESERVE FREQ:  cutoff frequency for low preservation (3 … 200 Hz).\n"
+    "TONE:           post-saturation LPF cutoff (100 … 20000 Hz).\n"
+    "DRY/WET:        0.0 … 1.0 (0=dry, 1=fully saturated).\n"
+    "OVERSAMPLE:     1×, 2×, 4×, 8×, 16×, MAX (32×).\n"
+    "CURVE INDEX:    Pick and choose your curve.\n"
+    "Curves available: (Atan (stock),tanh,sin,exp,log,artcangent,smoothstep,softclip,"
+    "hardclip,foldback)\n\n"
+    "Tubeopath Ultra – Made by D. Stativkin with love:\n"
+    "https://github.com/emptyjp/fl_edison_scripts"
+)
+
+form.AddInputKnob("DRIVE",           1.0,    0.1,   10.0)
+form.AddInputKnob("STAGE FACTOR",    0.05,   0.001,  1.0)
+form.AddInputCombo("STAGE COUNT",    ["1","2","5","10","20","100"], 3)
+form.AddInputKnob("EQ FREQ",       97.999,   3.0,   20000.0)
+form.AddInputKnob("EQ Q",           1.0,    0.1,    10.0)
+form.AddInputKnob("EQ GAIN",        0.0,   -24.0,    24.0)
+form.AddInputCombo("USE C HARM",    ["Off","1st","2nd","3rd","4th"], 0)
+form.AddInputCombo("PRESERVE LOWS", ["Off","Yes"], 0)
+form.AddInputKnob("PRESERVE FREQ",  80.0,    3.0,   200.0)
+form.AddInputKnob("TONE",         20000.0,  100.0,  20000.0)
+form.AddInputKnob("DRY/WET",        1.0,    0.0,     1.0)
+form.AddInputCombo("OVERSAMPLE",    ["1×","2×","4×","8×","16×","MAX"], 0)
+form.AddInputCombo("CURVE INDEX", "Atan (stock),tanh,sin,exp,log,artcangent,smoothstep,softclip,hardclip,foldback", 0)
+
+if form.Execute():
+    start_idx     = Editor.SelectionStartS
+    end_idx       = Editor.SelectionEndS
+    fs            = EditorSample.SampleRate
+    drive_val     = form.GetInputValue("DRIVE")
+    stage_val     = form.GetInputValue("STAGE FACTOR")
+    stage_idx     = form.GetInputValue("STAGE COUNT")
+    eq_freq_val   = form.GetInputValue("EQ FREQ")
+    eq_q_val      = form.GetInputValue("EQ Q")
+    eq_gain_val   = form.GetInputValue("EQ GAIN")
+    c_harm_flag   = int(form.GetInputValue("USE C HARM"))
+    preserve_flag = int(form.GetInputValue("PRESERVE LOWS"))
+    preserve_freq = form.GetInputValue("PRESERVE FREQ")
+    tone_val      = form.GetInputValue("TONE")
+    drywet_val    = form.GetInputValue("DRY/WET")
+    os_flag       = int(form.GetInputValue("OVERSAMPLE"))
+    curve_idx     = int(form.GetInputValue("CURVE INDEX"))
+
+    process_tubeopath(start_idx, end_idx, fs,
+                      drive_val, stage_val, stage_idx,
+                      eq_freq_val, eq_q_val, eq_gain_val,
+                      c_harm_flag, preserve_flag, preserve_freq,
+                      tone_val, drywet_val,
+                      os_flag, curve_idx)
