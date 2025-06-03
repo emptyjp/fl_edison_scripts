@@ -13,7 +13,6 @@ C:\Users\\%UserProfile%\Documents\Image-Line\FL Studio\Settings\Audio scripts
 
 You can make a separate folder for my scripts and name it "emptyjp".
 Aaaand, it'll be **right there!**
-https://github.com/emptyjp/fl_edison_scripts/
 
 ![Love](/img/itshere.png?raw=true "Your lovely scripts")
 
