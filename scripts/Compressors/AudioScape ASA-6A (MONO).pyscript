@@ -235,7 +235,7 @@ def process_asa6a(x1, x2, fs,
 # ============================================
 form = ScriptDialog(
     "ASA-6A Vari-Mu Compressor",
-    "This one is with LPF-based transformer saturation.\nIt doesn't support stereo, so, be aware of that.\nNine-tube, multi-transformer emulation with trim, bass preservation,\n"
+    "This one doesn't support stereo, so, be aware of that.\nNine-tube, multi-transformer emulation with trim, bass preservation,\n"
     "dry/wet blend, adjustable attack/release, and BAL-Limit modes.\n\n"
     "IN TRIM (dB):      adjust input level (e.g. -12 dB).\n"
     "OUT TRIM (dB):     makeup gain after processing.\n"
