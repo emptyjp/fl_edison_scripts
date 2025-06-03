@@ -3,6 +3,7 @@ import math
 
 # ===========================
 # ASA-6A Calibrated Vari-Mu Compressor with Flexible Bass, Dry/Wet, Attack/Release
+# Transformer saturation is LPF-based
 # ===========================
 def process_asa6a_calibrated(x1, x2, fs,
                              in_gain_db, out_gain_db,
@@ -215,7 +216,7 @@ def process_asa6a_calibrated(x1, x2, fs,
 # ===   E D I S O N   S C R I P T   ===
 # ============================================
 form = ScriptDialog(
-    "ASA-6A Calibrated Vari-Mu Compressor",
+    "ASA-6A Calibrated Vari-Mu Compressor\nThis one is with LPF-based transformer saturation (legacy version)\n",
     "Nine-tube, multi-transformer emulation with trim, selectable bass preservation,\n"
     "dry/wet blend, and adjustable attack/release.\n\n"
     "IN TRIM (dB):      adjust input level (e.g. -12 dB).\n"
