@@ -1,0 +1,300 @@
+from enveditor import *
+import math
+import random
+
+# ===========================
+# Psychick Modulations – Chorus + Flanger + Phaser + Air Multieffect for Edison
+# - Chain of Chorus, Flanger, Phaser, and Air (high-frequency) boost/shelf.
+# - Each effect has its own Rate, Depth, Feedback parameters.
+# - Includes global Dry/Wet mix and Auto-Gain compensation.
+# - Supports mono or stereo selections.
+# Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
+# ===========================
+
+def process_modulations(x1, x2, fs,
+                        # Chorus params
+                        chorus_rate, chorus_depth_ms, chorus_feedback,
+                        # Flanger params
+                        flanger_rate, flanger_depth_ms, flanger_delay_ms, flanger_feedback,
+                        # Phaser params
+                        phaser_rate, phaser_depth, phaser_feedback,
+                        # Air shelf
+                        air_db,
+                        # Dry/Wet
+                        dry_wet,
+                        # Auto-Gain
+                        auto_gain_flag):
+    """
+    x1, x2             : selection start/end (samples)
+    fs                 : sample rate
+    chorus_rate        : 0.1..10 Hz
+    chorus_depth_ms    : 0..30 ms
+    chorus_feedback    : 0..0.95
+    flanger_rate       : 0.1..10 Hz
+    flanger_depth_ms   : 0..5 ms
+    flanger_delay_ms   : 0.1..10 ms (base delay)
+    flanger_feedback   : 0..0.95
+    phaser_rate        : 0.1..5 Hz
+    phaser_depth       : 0..1 (modulation range spectral sweep)
+    phaser_feedback    : 0..0.95
+    air_db             : -12..+12 dB (high-shelf gain)
+    dry_wet            : 0..1
+    auto_gain_flag     : 0=Off, 1=On
+    """
+    # Determine mono/stereo
+    chans = EditorSample.NumChans if EditorSample.NumChans in (1, 2) else 1
+    length = x2 - x1 + 1
+
+    # --- Compute input peak for auto-gain ---
+    peak_in = 0.0
+    for i in range(length):
+        if chans == 1:
+            s = abs(EditorSample.GetSampleAt(x1 + i, 0))
+            peak_in = max(peak_in, s)
+        else:
+            L = abs(EditorSample.GetSampleAt(x1 + i, 0))
+            R = abs(EditorSample.GetSampleAt(x1 + i, 1))
+            peak_in = max(peak_in, L, R)
+    peak_in = peak_in or 1.0
+
+    # === Precompute constants ===
+    two_pi = 2 * math.pi
+
+    # Chorus
+    chorus_max_delay = int(fs * 0.030)  # 30 ms max
+    chorus_buf = [[0.0] * (chorus_max_delay + 1) for _ in range(chans)]
+    chorus_write = [0] * chans
+    chorus_phase = [0.0] * chans
+
+    # Flanger
+    flanger_max_delay = int(fs * 0.020)  # 20 ms max (depth + base)
+    flanger_buf = [[0.0] * (flanger_max_delay + 1) for _ in range(chans)]
+    flanger_write = [0] * chans
+    flanger_phase = [0.0] * chans
+    flanger_base_delay = max(1, int(flanger_delay_ms * fs / 1000.0))
+
+    # Phaser: using 4 cascaded first-order all-pass filters per channel
+    num_stages = 4
+    phaser_x_prev = [[0.0]*num_stages for _ in range(chans)]
+    phaser_y_prev = [[0.0]*num_stages for _ in range(chans)]
+    phaser_phase = [0.0] * chans
+
+    # Air shelf: one-pole lowpass to get low, subtract to get high, then add gain
+    cutoff_air = 5000.0  # 5 kHz cutoff for shelf
+    RC_air = 1.0 / (2 * math.pi * cutoff_air)
+    alpha_air = RC_air / (RC_air + (1.0 / fs))
+    air_gain = 10 ** (air_db / 20.0)
+    air_lpf = [0.0] * chans
+
+    # Read input into buffer
+    orig = []
+    for i in range(length):
+        if chans == 1:
+            s = EditorSample.GetSampleAt(x1 + i, 0)
+            orig.append((s,))
+        else:
+            L = EditorSample.GetSampleAt(x1 + i, 0)
+            R = EditorSample.GetSampleAt(x1 + i, 1)
+            orig.append((L, R))
+
+    # Prepare output buffer
+    proc = [(0.0, 0.0) for _ in range(length)] if chans == 2 else [0.0] * length
+
+    # Process each sample
+    for i in range(length):
+        if chans == 1:
+            xL = orig[i][0]
+            dryL = xL
+            outL = 0.0
+        else:
+            xL, xR = orig[i]
+            dryL, dryR = xL, xR
+            outL, outR = 0.0, 0.0
+
+        for ch, x in enumerate((xL, xR)[:chans]):
+            # -------------------
+            # 1) Chorus Stage
+            # -------------------
+            chorus_buf[ch][chorus_write[ch]] = x
+            chorus_phase[ch] += (two_pi * chorus_rate) / fs
+            if chorus_phase[ch] > two_pi:
+                chorus_phase[ch] -= two_pi
+            mod = (1 + math.sin(chorus_phase[ch])) / 2.0  # [0..1]
+            delay_samples = int(mod * (chorus_depth_ms * fs / 1000.0))
+            if delay_samples > chorus_max_delay:
+                delay_samples = chorus_max_delay
+            read_idx = chorus_write[ch] - delay_samples
+            if read_idx < 0:
+                read_idx += (chorus_max_delay + 1)
+            delayed = chorus_buf[ch][read_idx]
+            chorus_buf[ch][chorus_write[ch]] += delayed * chorus_feedback
+            chorus_write[ch] += 1
+            if chorus_write[ch] > chorus_max_delay:
+                chorus_write[ch] = 0
+            x_chorus = delayed
+
+            # -------------------
+            # 2) Flanger Stage
+            # -------------------
+            flanger_buf[ch][flanger_write[ch]] = x_chorus
+            flanger_phase[ch] += (two_pi * flanger_rate) / fs
+            if flanger_phase[ch] > two_pi:
+                flanger_phase[ch] -= two_pi
+            mod_f = (1 + math.sin(flanger_phase[ch])) / 2.0
+            fl_delay = flanger_base_delay + int(mod_f * (flanger_depth_ms * fs / 1000.0))
+            if fl_delay > flanger_max_delay:
+                fl_delay = flanger_max_delay
+            read_idx_f = flanger_write[ch] - fl_delay
+            if read_idx_f < 0:
+                read_idx_f += (flanger_max_delay + 1)
+            delayed_f = flanger_buf[ch][read_idx_f]
+            flanger_buf[ch][flanger_write[ch]] += delayed_f * flanger_feedback
+            flanger_write[ch] += 1
+            if flanger_write[ch] > flanger_max_delay:
+                flanger_write[ch] = 0
+            x_flanger = delayed_f
+
+            # -------------------
+            # 3) Phaser Stage
+            # -------------------
+            phaser_phase[ch] += (two_pi * phaser_rate) / fs
+            if phaser_phase[ch] > two_pi:
+                phaser_phase[ch] -= two_pi
+            min_fc = 500.0
+            max_fc = 1500.0
+            fc = min_fc + phaser_depth * (max_fc - min_fc) * (0.5 * (1 + math.sin(phaser_phase[ch])))
+            omega = 2 * math.pi * fc / fs
+            tan_w = math.tan(omega / 2.0)
+            a = (tan_w - 1) / (tan_w + 1)
+            y_phaser = x_flanger + phaser_feedback * (phaser_x_prev[ch][0] if num_stages > 0 else 0)
+            for stage in range(num_stages):
+                x_prev = phaser_x_prev[ch][stage]
+                y_prev = phaser_y_prev[ch][stage]
+                x_in = y_phaser if stage == 0 else phaser_y_prev[ch][stage - 1]
+                y_out = -a * x_in + x_prev + a * y_prev
+                phaser_x_prev[ch][stage] = x_in
+                phaser_y_prev[ch][stage] = y_out
+                y_phaser = y_out
+            x_phaser = y_phaser
+
+            # -------------------
+            # 4) Air Shelf Stage
+            # -------------------
+            air_lpf[ch] = alpha_air * air_lpf[ch] + (1.0 - alpha_air) * x_phaser
+            y_lf = air_lpf[ch]
+            y_hf = x_phaser - y_lf
+            x_air = y_lf + y_hf * air_gain
+
+            # -------------------
+            # 5) Dry/Wet Mix (store provisional in proc)
+            # -------------------
+            if chans == 1:
+                proc[i] = (dry_wet * x_air + (1.0 - dry_wet) * dryL,)
+            else:
+                if ch == 0:
+                    outL = dry_wet * x_air + (1.0 - dry_wet) * dryL
+                else:
+                    outR = dry_wet * x_air + (1.0 - dry_wet) * dryR
+                proc[i] = (outL, outR)
+
+        Utils.ProgressMsg("Psychick Modulations", i + 1, length)
+
+    # --- Auto-Gain Compensation ---
+    if auto_gain_flag == 1:
+        # Compute processed peak
+        peak_out = 0.0
+        if chans == 1:
+            for v in proc:
+                peak_out = max(peak_out, abs(v[0]))
+        else:
+            for L, R in proc:
+                peak_out = max(peak_out, abs(L), abs(R))
+        peak_out = peak_out or 1.0
+        norm = peak_in / peak_out
+    else:
+        norm = 1.0
+
+    # --- Write back with normalization ---
+    if chans == 1:
+        for i in range(length):
+            val = proc[i][0] * norm
+            EditorSample.SetSampleAt(x1 + i, 0, val)
+        EditorSample.NumChans = 1
+    else:
+        for i in range(length):
+            L, R = proc[i]
+            EditorSample.SetSampleAt(x1 + i, 0, L * norm)
+            EditorSample.SetSampleAt(x1 + i, 1, R * norm)
+        EditorSample.NumChans = 2
+
+
+# ============================
+# ===   E D I S O N   S C R I P T   ===
+# ============================
+form = ScriptDialog(
+    "Psychick Modulations – Chorus + Flanger + Phaser + Air + Auto-Gain",
+    "Chain of Chorus, Flanger, Phaser, and Air (high-shelf).\n"
+    "Each module has Rate, Depth, Feedback. Global Dry/Wet and Auto-Gain.\n\n"
+    "CHORUS RATE:        0.1 … 10 Hz\n"
+    "CHORUS DEPTH (ms):  0 … 30 ms\n"
+    "CHORUS FB:          0.0 … 0.95\n\n"
+    "FLANGER RATE:        0.1 … 10 Hz\n"
+    "FLANGER DEPTH (ms):  0 … 5 ms\n"
+    "FLANGER DELAY (ms):  0.1 … 10 ms\n"
+    "FLANGER FB:          0.0 … 0.95\n\n"
+    "PHASER RATE:         0.1 … 5 Hz\n"
+    "PHASER DEPTH:        0.0 … 1.0\n"
+    "PHASER FB:           0.0 … 0.95\n\n"
+    "AIR (dB):            -12 … +12 dB (high-shelf boost)\n"
+    "DRY/WET:             0.0 … 1.0\n"
+    "AUTO-GAIN:          On/Off (default On)\n\n"
+    "Supports mono or stereo selections.\n"
+    "Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts"
+)
+
+form.AddInputKnob("CHORUS RATE",         1.0,    0.1,   10.0)
+form.AddInputKnob("CHORUS DEPTH (ms)",  10.0,    0.0,   30.0)
+form.AddInputKnob("CHORUS FB",           0.3,    0.0,    0.95)
+
+form.AddInputKnob("FLANGER RATE",        1.0,    0.1,   10.0)
+form.AddInputKnob("FLANGER DEPTH (ms)",  2.0,    0.0,    5.0)
+form.AddInputKnob("FLANGER DELAY (ms)",  5.0,    0.1,   10.0)
+form.AddInputKnob("FLANGER FB",          0.3,    0.0,    0.95)
+
+form.AddInputKnob("PHASER RATE",         0.5,    0.1,    5.0)
+form.AddInputKnob("PHASER DEPTH",        0.5,    0.0,    1.0)
+form.AddInputKnob("PHASER FB",           0.3,    0.0,    0.95)
+
+form.AddInputKnob("AIR (dB)",            0.0,  -12.0,   12.0)
+form.AddInputKnob("DRY/WET",             0.5,    0.0,    1.0)
+form.AddInputCombo("AUTO-GAIN", ["Off","On"], 1)
+
+if form.Execute():
+    start_idx       = Editor.SelectionStartS
+    end_idx         = Editor.SelectionEndS
+    fs              = EditorSample.SampleRate
+
+    chorus_rate     = form.GetInputValue("CHORUS RATE")
+    chorus_depth    = form.GetInputValue("CHORUS DEPTH (ms)")
+    chorus_fb       = form.GetInputValue("CHORUS FB")
+
+    flanger_rate    = form.GetInputValue("FLANGER RATE")
+    flanger_depth   = form.GetInputValue("FLANGER DEPTH (ms)")
+    flanger_delay   = form.GetInputValue("FLANGER DELAY (ms)")
+    flanger_fb      = form.GetInputValue("FLANGER FB")
+
+    phaser_rate     = form.GetInputValue("PHASER RATE")
+    phaser_depth    = form.GetInputValue("PHASER DEPTH")
+    phaser_fb       = form.GetInputValue("PHASER FB")
+
+    air_db          = form.GetInputValue("AIR (dB)")
+    drywet_val      = form.GetInputValue("DRY/WET")
+    auto_gain_flag  = int(form.GetInputValue("AUTO-GAIN"))
+
+    process_modulations(start_idx, end_idx, fs,
+                        chorus_rate, chorus_depth, chorus_fb,
+                        flanger_rate, flanger_depth, flanger_delay, flanger_fb,
+                        phaser_rate, phaser_depth, phaser_fb,
+                        air_db,
+                        drywet_val,
+                        auto_gain_flag)
