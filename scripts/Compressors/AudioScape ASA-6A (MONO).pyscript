@@ -253,7 +253,7 @@ form = ScriptDialog(
     "Uses arctan for ultra-smooth saturation.\n\nMade by D. Stativkin with love.\nhttps://github.com/emptyjp/fl_edison_scripts"
 )
 
-form.AddInputKnob("IN TRIM (dB)",    -12.0,  -48.0,  0.0)
+form.AddInputKnob("IN TRIM (dB)",    -36.0,  -48.0,  0.0)
 form.AddInputKnob("OUT TRIM (dB)",     0.0,  -12.0, 12.0)
 form.AddInputCombo("NFB",       ["Stock","Drive"],      0)
 form.AddInputCombo("SC-HPF",    ["Stock","120 Hz"],      0)

@@ -1,0 +1,339 @@
+from enveditor import *
+import math
+
+# ===========================
+# ASA-6A Vari-Mu Compressor – Stereo Edition
+# Nine-tube, multi-transformer emulation with trim, bass preservation,
+# dry/wet blend, adjustable attack/release, BAL-Limit modes.
+# Transformer saturation is LPF-based; works on 1 or 2 channels.
+# Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
+# ===========================
+def process_asa6a_stereo(x1, x2, fs,
+                         in_gain_db, out_gain_db,
+                         nfb_mode, hpf_mode,
+                         bass_mode, dry_wet,
+                         attack_sec, release_sec, bal_mode):
+    """
+    x1, x2         : start/end sample indices (Editor.SelectionStartS, SelectionEndS)
+    fs             : EditorSample.SampleRate
+    in_gain_db     : input trim in dB (negative to attenuate)
+    out_gain_db    : output makeup gain in dB
+    nfb_mode       : 0=Stock, 1=Drive (+5 dB front gain)
+    hpf_mode       : 0=Stock, 1=120Hz sidechain HPF
+    bass_mode      : 0=Off, 1=Original LPF, 2=Trimmed LPF
+    dry_wet        : 0.0..1.0 (0 = dry, 1 = wet)
+    attack_sec     : user‐set attack time in seconds
+    release_sec    : user‐set release time in seconds
+    bal_mode       : 0=Off, 1=Single, 2=Dual
+    """
+    num_chans = EditorSample.NumChans if EditorSample.NumChans in (1,2) else 1
+    full_len = x2 - x1 + 1
+
+    # --- 1) PARAMETERS & CONSTS --- #
+    in_gain  = 10 ** (in_gain_db  / 20.0)
+    out_gain = 10 ** (out_gain_db / 20.0)
+
+    # Sidechain HPF at 120 Hz for envelope only
+    if hpf_mode == 1:
+        cutoff_hpf = 120.0
+        RC_hpf = 1.0 / (2 * math.pi * cutoff_hpf)
+        hpf_bc = RC_hpf / (RC_hpf + (1.0/fs))
+    else:
+        hpf_bc = 0.0
+
+    # BAL‐Limit → effective attack/release or bypass compression
+    if bal_mode == 1:      # Single: fast attack, user release
+        eff_attack  = 0.0001
+        eff_release = release_sec
+        do_comp = True
+    elif bal_mode == 2:    # Dual: user attack, slow release
+        eff_attack  = attack_sec
+        eff_release = 1.0
+        do_comp = True
+    else:                  # Off: bypass compression grid
+        eff_attack  = attack_sec
+        eff_release = release_sec
+        do_comp = False
+
+    alpha_a = math.exp(-1.0 / (fs * max(eff_attack, 1e-6)))
+    alpha_r = math.exp(-1.0 / (fs * max(eff_release, 1e-6)))
+
+    diode_vd = 0.1
+    sag_tc   = 0.8
+    alpha_sag = math.exp(-1.0 / (fs * sag_tc))
+
+    G0_6sk7 = 12.0
+    k_6sk7  = 0.25
+
+    # Drive constants
+    drive_tf_input   = 0.3
+    drive_tf_interst = 0.25
+    drive_6sk7_2     = 0.6
+    drive_6j7        = 0.4
+    drive_6v6        = 0.4
+    drive_tf_output  = 0.4
+
+    # Transformer LPF at 100 Hz (for each stage)
+    cutoff_tf = 100.0
+    RC_tf = 1.0 / (2 * math.pi * cutoff_tf)
+    tf_alpha = RC_tf / (RC_tf + (1.0/fs))
+
+    # Bass LPF at 80 Hz (for bass_mode)
+    bass_cutoff = 80.0
+    RC_bass = 1.0 / (2 * math.pi * bass_cutoff)
+    bass_alpha = RC_bass / (RC_bass + (1.0/fs))
+
+    # NFB Drive +5 dB
+    front_gain = 1.0
+    if nfb_mode == 1:
+        front_gain = 10 ** (5.0 / 20.0)
+
+    # --- 2) STATE VARIABLES (per channel) --- #
+    sc_hpf_prev  = 0.0
+    sc_input_prev= 0.0
+    env          = 0.0
+    sag_state    = 1.0
+
+    # Transformer LPF states per channel
+    tf_in_lpf    = [0.0]*num_chans
+    tf_is_lpf1   = [0.0]*num_chans
+    tf_is_lpf2   = [0.0]*num_chans
+    tf_out_lpf   = [0.0]*num_chans
+
+    # Bass LPF state (mono)
+    bass_lpf_state = 0.0
+
+    # --- 3) READ INPUT INTO TEMP LIST & MEASURE INPUT PEAK --- #
+    orig = []
+    peak_in = 0.0
+    for i in range(full_len):
+        if num_chans == 1:
+            s = EditorSample.GetSampleAt(x1 + i, 0)
+            orig.append((s,))
+            peak_in = max(peak_in, abs(s))
+        else:
+            L = EditorSample.GetSampleAt(x1 + i, 0)
+            R = EditorSample.GetSampleAt(x1 + i, 1)
+            orig.append((L, R))
+            peak_in = max(peak_in, abs(L), abs(R))
+    peak_in = peak_in or 1.0
+
+    # --- 4) PROCESS & BUILD TEMP “proc” ARRAY --- #
+    proc = [ (0.0,0.0) for _ in range(full_len) ] if num_chans==2 else [0.0]*full_len
+
+    for i in range(full_len):
+        # Unpack or single
+        if num_chans == 1:
+            xL = orig[i][0]
+            xR = 0.0
+            x_dry_L = xL
+            x_dry_R = 0.0
+        else:
+            xL, xR = orig[i]
+            x_dry_L = xL
+            x_dry_R = xR
+
+        # Input trim
+        x0 = [xL * in_gain, xR * in_gain] if num_chans==2 else [xL * in_gain]
+
+        # A) Input Transformer LPF split
+        x1s = [0.0]*num_chans
+        for ch in range(num_chans):
+            tf_in_lpf[ch] = tf_alpha*tf_in_lpf[ch] + (1 - tf_alpha)*x0[ch]
+            y_in_lf = tf_in_lpf[ch]
+            y_in_hf = x0[ch] - y_in_lf
+            y_in_lf_sat = math.atan(drive_tf_input * y_in_lf) * (2.0 / math.pi)
+            x1s[ch] = (y_in_lf_sat + y_in_hf) * front_gain
+
+        # Mono sum for envelope: (L+R)/2 or just L
+        x_active = x1s[0] if num_chans==1 else 0.5*(x1s[0] + x1s[1])
+
+        # B) Envelope & 6H6 (skip if bypass)
+        if do_comp:
+            if hpf_mode == 1:
+                hp = hpf_bc * (sc_hpf_prev + x_active - sc_input_prev)
+                sc_input_prev = x_active
+                sc_hpf_prev   = hp
+                x_sc = hp
+            else:
+                x_sc = x_active
+
+            if x_sc > diode_vd:
+                rectified = x_sc - diode_vd
+            elif x_sc < -diode_vd:
+                rectified = x_sc + diode_vd
+            else:
+                rectified = 0.0
+
+            r_abs = abs(rectified)
+            if r_abs > env:
+                env = alpha_a * env + (1 - alpha_a) * r_abs
+            else:
+                env = alpha_r * env + (1 - alpha_r) * r_abs
+
+            sag_state = alpha_sag * sag_state + (1 - alpha_sag) * (1.0 - min(env * 5.0, 1.0))
+
+            # C) 6SK7 #1 (per channel)
+            x2s = [0.0]*num_chans
+            G1_base = G0_6sk7 / (1.0 + k_6sk7 * env) * sag_state
+            for ch in range(num_chans):
+                x2s[ch] = math.atan(G1_base * x1s[ch]) * (2.0 / math.pi)
+        else:
+            x2s = x1s[:]  # bypass compression grid
+
+        # D) Interstage Transformer LPF split
+        x3s = [0.0]*num_chans
+        for ch in range(num_chans):
+            tf_is_lpf1[ch] = tf_alpha*tf_is_lpf1[ch] + (1 - tf_alpha)*x2s[ch]
+            y_is_lf = tf_is_lpf1[ch]
+            y_is_hf = x2s[ch] - y_is_lf
+            y_is_lf_sat = math.atan(drive_tf_interst * y_is_lf) * (2.0 / math.pi)
+            x3s[ch] = y_is_lf_sat + y_is_hf
+
+        # E) 6SK7 #2
+        x4s = [0.0]*num_chans
+        G2 = (6.0 * sag_state) if do_comp else 1.0
+        for ch in range(num_chans):
+            x4s[ch] = math.atan(drive_6sk7_2 * G2 * x3s[ch]) * (2.0 / math.pi)
+
+        # F) Coupling Transformer LPF split
+        x5s = [0.0]*num_chans
+        for ch in range(num_chans):
+            tf_is_lpf2[ch] = tf_alpha*tf_is_lpf2[ch] + (1 - tf_alpha)*x4s[ch]
+            y_is_lf = tf_is_lpf2[ch]
+            y_is_hf = x4s[ch] - y_is_lf
+            # note: drive_tf_interst factor is 0.35 on LF for coupling
+            y_is_lf_sat = math.atan(drive_tf_interst * 0.35 * y_is_lf) * (2.0 / math.pi)
+            x5s[ch] = y_is_lf_sat + y_is_hf
+
+        # G) 6J7 #1
+        x6s = [0.0]*num_chans
+        G3 = (5.0 * sag_state) if do_comp else 1.0
+        for ch in range(num_chans):
+            x6s[ch] = math.atan(drive_6j7 * G3 * x5s[ch]) * (2.0 / math.pi)
+
+        # H) 6J7 #2
+        x7s = [0.0]*num_chans
+        G4 = (5.0 * sag_state) if do_comp else 1.0
+        for ch in range(num_chans):
+            x7s[ch] = math.atan(drive_6j7 * G4 * x6s[ch]) * (2.0 / math.pi)
+
+        # I) 6V6 Output Stage
+        x8s = [0.0]*num_chans
+        G5 = (2.0 * sag_state) if do_comp else 1.0
+        for ch in range(num_chans):
+            y5 = math.atan(drive_6v6 * G5 * x7s[ch]) * (2.0 / math.pi)
+            even_bias = 0.005
+            y5_even = abs(y5) * y5
+            x8s[ch] = (1 - even_bias) * y5 + even_bias * y5_even
+
+        # J) Output Transformer LPF split
+        x9s = [0.0]*num_chans
+        for ch in range(num_chans):
+            tf_out_lpf[ch] = tf_alpha*tf_out_lpf[ch] + (1 - tf_alpha)*x8s[ch]
+            y_out_lf = tf_out_lpf[ch]
+            y_out_hf = x8s[ch] - y_out_lf
+            y_out_lf_sat = math.atan(drive_tf_output * 0.25 * y_out_lf) * (2.0 / math.pi)
+            x9s[ch] = y_out_lf_sat + y_out_hf
+
+        # K) Bass Preservation (mono LPF; add back to both channels equally)
+        bass_comp = 0.0
+        mono_orig = x_dry_L if num_chans==1 else 0.5*(x_dry_L + x_dry_R)
+        x0_mono = mono_orig * in_gain
+        if bass_mode == 1:
+            bass_lpf_state = bass_alpha * bass_lpf_state + (1 - bass_alpha) * mono_orig
+            bass_comp = bass_lpf_state
+        elif bass_mode == 2:
+            bass_lpf_state = bass_alpha * bass_lpf_state + (1 - bass_alpha) * x0_mono
+            bass_comp = bass_lpf_state
+
+        # L) Mix Dry/Wet + Bass, write temp
+        if num_chans == 1:
+            proc_val = x9s[0] + bass_comp
+            out_s = dry_wet * proc_val + (1 - dry_wet) * x_dry_L
+            proc[i] = out_s
+        else:
+            mixed_L = x9s[0] + bass_comp
+            mixed_R = x9s[1] + bass_comp
+            out_L = dry_wet * mixed_L + (1 - dry_wet) * x_dry_L
+            out_R = dry_wet * mixed_R + (1 - dry_wet) * x_dry_R
+            proc[i] = (out_L, out_R)
+
+    # --- 5) NORMALIZE entire result --- #
+    if num_chans == 1:
+        peak_out = max(abs(v) for v in proc) or 1.0
+        norm_f = 1.0 / peak_out
+        for i in range(full_len):
+            idx = x1 + i
+            EditorSample.SetSampleAt(idx, 0, proc[i] * norm_f * out_gain)
+            Utils.ProgressMsg("ASA-6A Mono→Stereo", i+1, full_len)
+    else:
+        peak_out = 0.0
+        for (L, R) in proc:
+            peak_out = max(peak_out, abs(L), abs(R))
+        peak_out = peak_out or 1.0
+        norm_f = 1.0 / peak_out
+        for i in range(full_len):
+            idx = x1 + i
+            L, R = proc[i]
+            EditorSample.SetSampleAt(idx, 0, L * norm_f * out_gain)
+            EditorSample.SetSampleAt(idx, 1, R * norm_f * out_gain)
+            Utils.ProgressMsg("ASA-6A Mono→Stereo", i+1, full_len)
+
+    # --- 6) ENSURE EDISON CHANNEL COUNT --- #
+    EditorSample.NumChans = num_chans
+
+
+# ============================================
+# ===    E D I S O N   S C R I P T      ===
+# ============================================
+form = ScriptDialog(
+    "ASA-6A Vari-Mu Compressor (Stereo)",
+    "Nine-tube, multi-transformer emulation with trim, bass preservation,\n"
+    "dry/wet blend, adjustable attack/release, and BAL-Limit modes.\n"
+    "Transformer saturation is LPF-based; works in mono or stereo.\n\n"
+    "IN TRIM (dB):      adjust input level (e.g. -12 dB).\n"
+    "OUT TRIM (dB):     makeup gain after processing.\n"
+    "NFB (Drive):       0=Stock, 1=Drive (+5 dB pre-gain).\n"
+    "SC-HPF:            0=Stock, 1=120 Hz sidechain HPF.\n"
+    "Bass Mode:         0=Off, 1=Original LPF, 2=Trimmed LPF.\n"
+    "Dry/Wet:           0.0..1.0 (0 = dry, 1 = wet).\n"
+    "ATTACK (sec):      0.0001 (fast) … 0.05 (slow).\n"
+    "RELEASE (sec):     0.05 (fast) … 1.0 (slow).\n"
+    "BAL-Limit:         0=Off, 1=Single (very fast attack), 2=Dual (very slow release).\n"
+    " - Off: bypass compression; tubes & transformers still active.\n"
+    " - Single: attack forced very fast; release = chosen value.\n"
+    " - Dual: release forced very slow; attack = chosen value.\n"
+    "Uses arctan for ultra-smooth saturation.\n\n"
+    "Made by D. Stativkin with love.\n"
+    "https://github.com/emptyjp/fl_edison_scripts"
+)
+
+form.AddInputKnob("IN TRIM (dB)",    -36.0,  -48.0,  0.0)
+form.AddInputKnob("OUT TRIM (dB)",     0.0,  -12.0, 12.0)
+form.AddInputCombo("NFB",       ["Stock","Drive"],      0)
+form.AddInputCombo("SC-HPF",    ["Stock","120 Hz"],      0)
+form.AddInputCombo("Bass Mode", ["Off","Original LPF","Trimmed LPF"], 0)
+form.AddInputKnob("Dry/Wet",      1.0,    0.0,     1.0)
+form.AddInputKnob("ATTACK (sec)", 0.002,  0.0001,  0.05)
+form.AddInputKnob("RELEASE (sec)",0.2,    0.05,    1.0)
+form.AddInputCombo("BAL-Limit",  ["Off","Single","Dual"], 1)
+
+if form.Execute():
+    start_idx   = Editor.SelectionStartS
+    end_idx     = Editor.SelectionEndS
+    fs          = EditorSample.SampleRate
+    in_db       = form.GetInputValue("IN TRIM (dB)")
+    out_db      = form.GetInputValue("OUT TRIM (dB)")
+    nfb_flag    = int(form.GetInputValue("NFB"))
+    hpf_flag    = int(form.GetInputValue("SC-HPF"))
+    bass_flag   = int(form.GetInputValue("Bass Mode"))
+    dry_wet_val = form.GetInputValue("Dry/Wet")
+    attack_sec  = form.GetInputValue("ATTACK (sec)")
+    release_sec = form.GetInputValue("RELEASE (sec)")
+    bal_flag    = int(form.GetInputValue("BAL-Limit"))
+    process_asa6a_stereo(start_idx, end_idx, fs,
+                         in_db, out_db,
+                         nfb_flag, hpf_flag,
+                         bass_flag, dry_wet_val,
+                         attack_sec, release_sec, bal_flag)
