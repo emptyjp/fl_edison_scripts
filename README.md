@@ -22,7 +22,7 @@ Aaaand, it'll be **right there!**
 ![Audioscape ASA-6A](/img/asa6a.png?raw=true "Audioscape ASA-6A")
 
 Yeah, this is, like, the best thing I've ever created. It's cool.
-It emulates every single tube & transformer stage in the OG Audioscape compressor.
+It emulates every single tube & transformer stage in the OG Audioscape compressor. Sounds nothing like the original, though, but I'm working on it.
 
 ### Hall of fame:
 
