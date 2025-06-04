@@ -22,6 +22,6 @@ Aaaand, it'll be **right there!**
 
 * [Asymmetrical Advanced Soft-Clipper with a RMS Envelope Restore function.](/scripts/emptyjp/Soft%20Clipping/Asym%20Advanced%20Soft%20Clipper.pyscript)
 
-* [Heaven or Las Vegas](/scripts/emptyjp/Misc/Heaven%20Or%20Las%20Vegas.pyscript)
+* [Heaven or Las Vegas](/scripts/emptyjp/Misc/Heaven%20Or%20Las%20Vegas.pyscript) - A whole chain from Cocteau Twins - Heaven or Las Vegas
 
-* [Tubeopath Ultra](/scripts/emptyjp/Saturation/Tubeopath%20Ultra.pyscript)
+* [Tubeopath Ultra](/scripts/emptyjp/Saturation/Tubeopath%20Ultra.pyscript) - Multi-Tube* Saturator (*or you can choose your own curves) - with Stage EQ Bell (That applies every stage)! From 2 to 100 stages
