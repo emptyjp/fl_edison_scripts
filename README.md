@@ -4,7 +4,8 @@ Edison Scripts is certainly a strange endeavor. Like, you can make plugins, or, 
 
 These are my scripts. Made these for myself (and you), and for fun, and, the things you can do inside Edison, or other editors, are far more diverse than plugins. Plugins can only see into the past, while Edison can see every single sample point while processing your signal. Opens up a whole different world.
 
-I'm not that much of a plug-in developer, but, I certainly love experimentation.
+I love coding things that couldn't be remade with plugins.
+
 Latest additions: [Tubeopath Ultra](/scripts/emptyjp/Saturation/Tubeopath%20Ultra.pyscript), [Psychick Noise](/scripts/emptyjp/Misc/Psychick%20Noise.pyscript), [Psychick Modulations](/scripts/emptyjp/Misc/Psychick%20Modulations.pyscript), [Heaven or Las Vegas](/scripts/emptyjp/Misc/Heaven%20Or%20Las%20Vegas.pyscript)
 ## How to install these???
 
