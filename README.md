@@ -5,7 +5,7 @@ Edison Scripts is certainly a strange endeavor. Like, you can make plugins, or, 
 These are my scripts. Made these for myself (and you), and for fun, and, the things you can do inside Edison, or other editors, are far more diverse than plugins. Plugins can only see into the past, while Edison can see every single sample point while processing your signal. Opens up a whole different world.
 
 I'm not that much of a plug-in developer, but, I certainly love experimentation.
-Latest additions: [Tubeopath Ultra](/scripts/Saturation/Tubeopath%20Ultra.pyscript), [Psychic Noise](/scripts/Misc/Psychick%20Noise.pyscript), [Psychic Modulations](/scripts/Misc/Psychick%20Modulations.pyscript)
+Latest additions: [Tubeopath Ultra](/scripts/Saturation/Tubeopath%20Ultra.pyscript), [Psychick Noise](/scripts/Misc/Psychick%20Noise.pyscript), [Psychick Modulations](/scripts/Misc/Psychick%20Modulations.pyscript)
 ## How to install these???
 
 Simple. Just get scripts folder, then, put all the files in:
