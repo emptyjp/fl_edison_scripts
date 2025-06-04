@@ -1,0 +1,229 @@
+from enveditor import *
+import math
+import random
+
+# ===========================
+# Psychick Noise – Shoegaze FX for Edison
+# - Smooth, blue-noise–driven fuzz/distortion with RMS-controlled noise volume,
+#   tilt EQ, and TRUE STEREO chorus (Rate, Depth, Dry/Wet).
+# - It combines blue noise, RMS envelope,
+#   fuzz, random modulation, hard clipping, bit-crush, tilt EQ, and stereo chorus.
+# - Supports mono or stereo selections, but always outputs stereo.
+# Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
+# ===========================
+
+def process_psychick_noise(x1, x2, fs,
+                           noisy, fuzzy, hectic, aggressive, broken,
+                           drive, dry_wet, tilt,
+                           chorus_rate, chorus_depth, chorus_mix):
+    """
+    x1, x2       : selection start/end (samples)
+    fs           : sample rate
+    noisy        : 0..1 (amount of blue noise)
+    fuzzy        : 0..1 (fuzz intensity)
+    hectic       : 0..1 (random amplitude modulation)
+    aggressive   : 0..1 (hard clip intensity)
+    broken       : 0..1 (bit-crush intensity)
+    drive        : 0.1..10 (input gain)
+    dry_wet      : 0..1 (mix processed vs. dry)
+    tilt         : 0..1 (spectral tilt: 0=full lowpass, 1=full highpass)
+    chorus_rate  : 0.1..10 (Hz)
+    chorus_depth : 0..1 (0=no chorus, 1=max depth ~30ms)
+    chorus_mix   : 0..1 (mix chorused vs. unchorused)
+    """
+    # Always process in 2-channel stereo
+    chans = 2
+    length = x2 - x1 + 1
+
+    # --- RMS Envelope Follower parameters ---
+    rms_tc = 0.01  # 10 ms time constant
+    alpha_rms = math.exp(-1.0 / (fs * rms_tc))
+    env_sq = [0.0, 0.0]
+
+    # Initialize previous white noise values for blue-noise generation
+    prev_white = [0.0, 0.0]
+
+    # Tilt filter coefficient (one-pole lowpass at 1000 Hz)
+    cutoff_tilt = 1000.0
+    RC_tilt = 1.0 / (2 * math.pi * cutoff_tilt)
+    alpha_tilt = RC_tilt / (RC_tilt + (1.0 / fs))
+    tilt_lpf = [0.0, 0.0]
+
+    # Chorus parameters
+    max_delay_ms = 30  # maximum delay in ms (~30 ms)
+    max_delay = int(fs * max_delay_ms / 1000.0) or 1
+    # Buffers for true stereo chorus
+    chorus_buf = [[0.0] * (max_delay + 1) for _ in range(2)]
+    write_idx = [0, 0]
+    phase = [0.0, math.pi]  # out-of-phase for stereo widening
+    two_pi = 2 * math.pi
+
+    # Read input into buffer and duplicate channels if mono
+    orig = []
+    is_mono = (EditorSample.NumChans == 1)
+    for i in range(length):
+        if is_mono:
+            s = EditorSample.GetSampleAt(x1 + i, 0)
+            orig.append((s, s))
+        else:
+            L = EditorSample.GetSampleAt(x1 + i, 0)
+            R = EditorSample.GetSampleAt(x1 + i, 1)
+            orig.append((L, R))
+
+    # Prepare output buffer (always stereo)
+    proc = [(0.0, 0.0)] * length
+
+    for i in range(length):
+        xL, xR = orig[i]
+        dryL, dryR = xL, xR
+        outL, outR = 0.0, 0.0
+
+        for ch, x in enumerate((xL, xR)):
+            # 1) Apply drive
+            x1v = x * drive
+
+            # 2) RMS envelope follower on input
+            env_sq[ch] = alpha_rms * env_sq[ch] + (1 - alpha_rms) * (x1v * x1v)
+            rms_val = math.sqrt(env_sq[ch] + 1e-16)
+
+            # 3) Generate blue noise: current white minus previous white
+            white = random.uniform(-1.0, 1.0)
+            blue = white - prev_white[ch]
+            prev_white[ch] = white
+
+            # 4) Scale noise amplitude by RMS and noisy parameter
+            noise_amp = noisy * rms_val * 0.5
+            x2v = x1v + noise_amp * blue
+
+            # 5) Fuzz (tanh-based)
+            fuzz_gain = 1.0 + fuzzy * 10.0
+            x3v = math.tanh(x2v * fuzz_gain)
+
+            # 6) Hectic random amplitude modulation
+            if hectic > 0.0:
+                mod = 1.0 + hectic * random.uniform(-0.5, 0.5)
+                x4v = x3v * mod
+            else:
+                x4v = x3v
+
+            # 7) Aggressive hard clipping
+            if aggressive > 0.0:
+                threshold = 1.0 - aggressive * 0.5
+                x5v = max(-threshold, min(threshold, x4v))
+            else:
+                x5v = x4v
+
+            # 8) Broken bit-crush
+            if broken > 0.0:
+                lvl = int(256 - broken * 254)
+                if lvl < 2:
+                    lvl = 2
+                step = 2.0 / (lvl - 1)
+                quant = round((x5v + 1.0) / step)
+                x6v = quant * step - 1.0
+            else:
+                x6v = x5v
+
+            # 9) TRUE STEREO Chorus processing
+            # Write current sample into channel buffer
+            chorus_buf[ch][write_idx[ch]] = x6v
+            # Compute modulation offset per channel
+            phase[ch] += (two_pi * chorus_rate) / fs
+            if phase[ch] > two_pi:
+                phase[ch] -= two_pi
+            mod_val = (1 + math.sin(phase[ch])) / 2.0  # [0..1]
+            delay_samples = int(mod_val * chorus_depth * max_delay)
+            read_idx = write_idx[ch] - delay_samples
+            if read_idx < 0:
+                read_idx += max_delay + 1
+            x7v = chorus_buf[ch][read_idx]
+            # Increment write index
+            write_idx[ch] += 1
+            if write_idx[ch] > max_delay:
+                write_idx[ch] = 0
+            # Mix dry/chorus
+            x8v = chorus_mix * x7v + (1.0 - chorus_mix) * x6v
+
+            # 10) Tilt EQ: one-pole lowpass + high-pass remainder
+            tilt_lpf[ch] = alpha_tilt * tilt_lpf[ch] + (1.0 - alpha_tilt) * x8v
+            y_lf = tilt_lpf[ch]
+            y_hf = x8v - y_lf
+            t = (tilt * 2.0) - 1.0  # [-1..1]
+            mix_l = (1.0 - t) / 2.0
+            mix_h = (1.0 + t) / 2.0
+            x9v = mix_l * y_lf + mix_h * y_hf
+
+            # 11) Dry/Wet mix final
+            if ch == 0:
+                outL = dry_wet * x9v + (1.0 - dry_wet) * dryL
+            else:
+                outR = dry_wet * x9v + (1.0 - dry_wet) * dryR
+
+        # Store stereo output
+        proc[i] = (outL, outR)
+        Utils.ProgressMsg("Psychick Noise", i+1, length)
+
+    # Write processed samples back to editor (always stereo)
+    EditorSample.NumChans = 2
+    for i in range(length):
+        L, R = proc[i]
+        EditorSample.SetSampleAt(x1 + i, 0, L)
+        EditorSample.SetSampleAt(x1 + i, 1, R)
+
+
+# ============================
+# ===   E D I S O N   S C R I P T   ===
+# ============================
+form = ScriptDialog(
+    "Psychick Noise – Shoegaze Guitar Pedal FX (True Stereo Chorus)",
+    "Psychoacoustic soothing + blue noise, fuzzy, hectic, aggressive, broken textures.\n"
+    "Now with RMS-controlled blue noise and TRUE STEREO chorus.\n\n"
+    "NOISY:           0.0 … 1.0 → amount of blue noise (volume follows RMS).\n"
+    "FUZZY:           0.0 … 1.0 → tanh-based fuzz intensity.\n"
+    "HECTIC:          0.0 … 1.0 → random amplitude modulation.\n"
+    "AGGRESSIVE:      0.0 … 1.0 → hard-clip intensity.\n"
+    "BROKEN:          0.0 … 1.0 → bit-crush intensity.\n"
+    "DRIVE:           0.1 … 10.0 → input gain.\n"
+    "DRY/WET:         0.0 … 1.0 → mix processed vs. dry.\n"
+    "TILT:            0.0 … 1.0 → spectral tilt (0=lowpass, 1=highpass).\n"
+    "CHORUS RATE:     0.1 … 10.0 → chorus LFO frequency (Hz).\n"
+    "CHORUS DEPTH:    0.0 … 1.0 → chorus delay depth (0=no, 1=~30ms).\n"
+    "CHORUS MIX:      0.0 … 1.0 → mix chorused vs. unchorused.\n\n"
+    "This script always outputs 2-channel stereo, even if input is mono.\n"
+    "Embrace the blue-noise chaos!\n"
+    "Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts"
+)
+
+form.AddInputKnob("NOISY",          0.2,  0.0,  1.0)
+form.AddInputKnob("FUZZY",          0.2,  0.0,  1.0)
+form.AddInputKnob("HECTIC",         0.2,  0.0,  1.0)
+form.AddInputKnob("AGGRESSIVE",     0.2,  0.0,  1.0)
+form.AddInputKnob("BROKEN",         0.2,  0.0,  1.0)
+form.AddInputKnob("DRIVE",          1.0,  0.1, 10.0)
+form.AddInputKnob("DRY/WET",        1.0,  0.0,  1.0)
+form.AddInputKnob("TILT",           0.5,  0.0,  1.0)
+form.AddInputKnob("CHORUS RATE",    1.0,  0.1, 10.0)
+form.AddInputKnob("CHORUS DEPTH",   0.5,  0.0,  1.0)
+form.AddInputKnob("CHORUS MIX",     0.5,  0.0,  1.0)
+
+if form.Execute():
+    start_idx     = Editor.SelectionStartS
+    end_idx       = Editor.SelectionEndS
+    fs            = EditorSample.SampleRate
+
+    noisy_val     = form.GetInputValue("NOISY")
+    fuzzy_val     = form.GetInputValue("FUZZY")
+    hectic_val    = form.GetInputValue("HECTIC")
+    aggr_val      = form.GetInputValue("AGGRESSIVE")
+    broken_val    = form.GetInputValue("BROKEN")
+    drive_val     = form.GetInputValue("DRIVE")
+    drywet_val    = form.GetInputValue("DRY/WET")
+    tilt_val      = form.GetInputValue("TILT")
+    chorus_rate   = form.GetInputValue("CHORUS RATE")
+    chorus_depth  = form.GetInputValue("CHORUS DEPTH")
+    chorus_mix    = form.GetInputValue("CHORUS MIX")
+
+    process_psychick_noise(start_idx, end_idx, fs,
+                           noisy_val, fuzzy_val, hectic_val, aggr_val, broken_val,
+                           drive_val, drywet_val, tilt_val,
+                           chorus_rate, chorus_depth, chorus_mix)
