@@ -8,10 +8,11 @@ I'm not that much of a plug-in developer, but, I certainly love experimentation.
 Latest additions: [Tubeopath Ultra](/scripts/Saturation/Tubeopath%20Ultra.pyscript), [Psychick Noise](/scripts/Misc/Psychick%20Noise.pyscript), [Psychick Modulations](/scripts/Misc/Psychick%20Modulations.pyscript)
 ## How to install these???
 
-Simple. Just get scripts folder, then, put all the files in:
+Simple. Just get the scripts folder, then, put the emptyjp folder in:
 \%UserProfile%\Documents\Image-Line\FL Studio\Settings\Audio scripts
 
-You can make a separate folder for my scripts and name it "emptyjp".
+(you can press Win+R if you're on Windows and paste the path above)
+
 Aaaand, it'll be **right there!**
 
 ![Love](/img/itshere.png?raw=true "Your lovely scripts")
