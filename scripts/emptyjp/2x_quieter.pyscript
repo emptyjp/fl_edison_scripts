@@ -1,0 +1,12 @@
+from enveditor import *
+
+def simple_volume_reduction():
+    x1 = Editor.SelectionStartS
+    x2 = Editor.SelectionEndS
+
+    for n in range(x1, x2 + 1):
+        for c in range(EditorSample.NumChans):
+            val = EditorSample.GetSampleAt(n, c)
+            EditorSample.SetSampleAt(n, c, val * 0.5)  # Притушим громкость
+
+simple_volume_reduction()
