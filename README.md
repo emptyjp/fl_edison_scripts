@@ -9,7 +9,7 @@ Latest additions: [Tubeopath Ultra](/scripts/Saturation/Tubeopath%20Ultra.pyscri
 ## How to install these???
 
 Simple. Just get scripts folder, then, put all the files in:
-C:\Users\\%UserProfile%\Documents\Image-Line\FL Studio\Settings\Audio scripts
+\%UserProfile%\Documents\Image-Line\FL Studio\Settings\Audio scripts
 
 You can make a separate folder for my scripts and name it "emptyjp".
 Aaaand, it'll be **right there!**
