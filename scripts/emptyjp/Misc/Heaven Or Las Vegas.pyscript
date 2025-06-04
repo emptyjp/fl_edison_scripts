@@ -1,0 +1,346 @@
+from enveditor import *
+import math
+import random
+
+# =========================================
+# Heaven Or Vegas Chain – Complete Guitar FX (Fixed Pitch-Spread Bounds)
+# =========================================
+
+def process_heaven_or_vegas(x1, x2, fs,
+                            compressor_type,
+                            pitch_spread_cents,
+                            chorus_rate, chorus_depth_ms, chorus_mix,
+                            bpm, delay_division, delay_fb, delay_mix,
+                            distorted, overdrive_drive,
+                            double_track, dt_offset_ms):
+    """
+    x1, x2              : selection start/end (samples)
+    fs                  : sample rate
+    compressor_type     : 0=Off, 1=1178, 2=dbx
+    pitch_spread_cents  : ± cents for stereo spread (e.g. 10)
+    chorus_rate         : 0.2..3.0 Hz
+    chorus_depth_ms     : 1..10 ms
+    chorus_mix          : 0..1
+    bpm                 : beats per minute (for delay sync)
+    delay_division      : index for ["1/4","1/8","1/16","1/8T"]
+    delay_fb            : 0..0.9
+    delay_mix           : 0..1
+    distorted           : 0=Off, 1=On
+    overdrive_drive     : 1..10 gain for overdrive
+    double_track        : 0=Off, 1=On
+    dt_offset_ms        : 10..30 ms offset for double tracking
+    """
+    chans = EditorSample.NumChans if EditorSample.NumChans in (1, 2) else 1
+    length = x2 - x1 + 1
+
+    # --- Read input into buffer & measure peak_in ---
+    orig = []
+    peak_in = 0.0
+    for i in range(length):
+        if chans == 1:
+            s = EditorSample.GetSampleAt(x1 + i, 0)
+            orig.append((s,))
+            peak_in = max(peak_in, abs(s))
+        else:
+            L = EditorSample.GetSampleAt(x1 + i, 0)
+            R = EditorSample.GetSampleAt(x1 + i, 1)
+            orig.append((L, R))
+            peak_in = max(peak_in, abs(L), abs(R))
+    peak_in = peak_in or 1.0
+
+    # --- Compressor Settings ---
+    if compressor_type == 1:  # 1178
+        comp_ratio = 4.0
+        comp_attack = 0.001  # 1 ms
+        comp_release = 0.1   # 100 ms
+        comp_threshold = 0.5
+    elif compressor_type == 2:  # dbx 160
+        comp_ratio = 6.0
+        comp_attack = 0.001
+        comp_release = 0.2
+        comp_threshold = 0.6
+    else:
+        comp_ratio = 1.0
+        comp_attack = comp_release = 0.01
+        comp_threshold = 10.0  # effectively bypass
+
+    alpha_a = math.exp(-1.0 / (fs * comp_attack))
+    alpha_r = math.exp(-1.0 / (fs * comp_release))
+    env = [0.0] * chans
+
+    # --- Pitch Spread Ratios ---
+    cents = pitch_spread_cents
+    semitone_ratio_pos = 2 ** ((cents / 100.0) / 12.0)
+    semitone_ratio_neg = 2 ** ((-cents / 100.0) / 12.0)
+
+    # Allocate buffers for pitch‐shifted stereo paths
+    pitched_L = [0.0] * length
+    pitched_R = [0.0] * length
+
+    # Pre‐generate pitched buffers with proper bounds check
+    for idx in range(length):
+        # Left channel pitched up by +cents
+        pos_idx_L = idx / semitone_ratio_pos
+        idx0 = int(math.floor(pos_idx_L))
+        frac = pos_idx_L - idx0
+        if 0 <= idx0 < length:
+            s0 = orig[idx0][0] if chans == 1 else orig[idx0][0]
+        else:
+            s0 = 0.0
+        idx1 = idx0 + 1
+        if 0 <= idx1 < length:
+            s1 = orig[idx1][0] if chans == 1 else orig[idx1][0]
+        else:
+            s1 = 0.0
+        pitched_L[idx] = s0 + frac * (s1 - s0)
+
+        # Right channel pitched down by –cents
+        pos_idx_R = idx / semitone_ratio_neg
+        idx0 = int(math.floor(pos_idx_R))
+        frac = pos_idx_R - idx0
+        if chans == 2:
+            if 0 <= idx0 < length:
+                s0 = orig[idx0][1]
+            else:
+                s0 = 0.0
+            idx1 = idx0 + 1
+            if 0 <= idx1 < length:
+                s1 = orig[idx1][1]
+            else:
+                s1 = 0.0
+        else:
+            # For mono, use same data
+            if 0 <= idx0 < length:
+                s0 = orig[idx0][0]
+            else:
+                s0 = 0.0
+            idx1 = idx0 + 1
+            if 0 <= idx1 < length:
+                s1 = orig[idx1][0]
+            else:
+                s1 = 0.0
+        pitched_R[idx] = s0 + frac * (s1 - s0)
+
+    if chans == 1:
+        pitched_R = pitched_L[:]
+
+    # --- Chorus Setup (Dimension D–style subtle 4-voice) ---
+    chorus_max_delay = int(fs * 0.012)  # 12 ms max
+    chorus_buf_L = [0.0] * (chorus_max_delay + 1)
+    chorus_buf_R = [0.0] * (chorus_max_delay + 1)
+    write_L = write_R = 0
+    phases = [0.0, math.pi/2, math.pi, 3*math.pi/2]
+    num_voices = 4
+
+    # --- Delay Setup (TC2290 style sync) ---
+    quarter_sec = 60.0 / bpm
+    if delay_division == 0:  # 1/4
+        delay_time = quarter_sec
+    elif delay_division == 1:  # 1/8
+        delay_time = quarter_sec / 2.0
+    elif delay_division == 2:  # 1/16
+        delay_time = quarter_sec / 4.0
+    else:  # 1/8 triplet
+        delay_time = quarter_sec / 3.0
+
+    delay_samples = int(delay_time * fs)
+    max_delay = delay_samples + int(delay_time * fs * 0.2) + 1
+    delay_buf_L = [0.0] * max_delay
+    delay_buf_R = [0.0] * max_delay
+    write_d_L = write_d_R = 0
+
+    # --- Overdrive Setup (Gallien Kruger–style) ---
+    od_gain = overdrive_drive
+
+    # --- Double-Tracking Setup ---
+    dt_offset_samples = int(dt_offset_ms * fs / 1000.0)
+    processed_mid = [ (0.0, 0.0) for _ in range(length) ]
+
+    # --- Main Processing Loop ---
+    for i in range(length):
+        xL = pitched_L[i]
+        xR = pitched_R[i]
+
+        # 1) Compressor
+        for ch, x in enumerate((xL, xR)):
+            absx = abs(x)
+            if absx > env[ch]:
+                env[ch] = alpha_a * env[ch] + (1 - alpha_a) * absx
+            else:
+                env[ch] = alpha_r * env[ch] + (1 - alpha_r) * absx
+            if compressor_type != 0:
+                if env[ch] > comp_threshold:
+                    gr = 1.0 + ((comp_threshold - env[ch]) * (1 - 1/comp_ratio) / env[ch])
+                else:
+                    gr = 1.0
+            else:
+                gr = 1.0
+            if ch == 0:
+                cxL = xL * gr
+            else:
+                cxR = xR * gr
+
+        # 2) Overdrive if distorted
+        if distorted == 1:
+            dxL = math.tanh(cxL * od_gain)
+            dxR = math.tanh(cxR * od_gain)
+        else:
+            dxL = cxL
+            dxR = cxR
+
+        # 3) Chorus (4 voices, mod around ~8 ms)
+        sumL = sumR = 0.0
+        for v in range(num_voices):
+            phases[v] += (2 * math.pi * chorus_rate) / fs
+            if phases[v] > 2 * math.pi:
+                phases[v] -= 2 * math.pi
+            mod = (math.sin(phases[v]) + 1.0) / 2.0
+            delay_ms = 8.0 + chorus_depth_ms * (mod - 0.5)
+            d_samples = int((delay_ms / 1000.0) * fs)
+
+            idxL = write_L - d_samples
+            if idxL < 0:
+                idxL += (chorus_max_delay + 1)
+            sumL += chorus_buf_L[idxL]
+            chorus_buf_L[write_L] = dxL + chorus_buf_L[idxL] * 0.2
+
+            idxR = write_R - d_samples
+            if idxR < 0:
+                idxR += (chorus_max_delay + 1)
+            sumR += chorus_buf_R[idxR]
+            chorus_buf_R[write_R] = dxR + chorus_buf_R[idxR] * 0.2
+
+            write_L = (write_L + 1) if write_L < chorus_max_delay else 0
+            write_R = (write_R + 1) if write_R < chorus_max_delay else 0
+
+        cL = sumL / num_voices
+        cR = sumR / num_voices
+        mL = (1 - chorus_mix) * dxL + chorus_mix * cL
+        mR = (1 - chorus_mix) * dxR + chorus_mix * cR
+
+        # 4) Delay (TC2290‐style)
+        delay_buf_L[write_d_L] = mL + delay_buf_L[(write_d_L - delay_samples) % max_delay] * delay_fb
+        delay_buf_R[write_d_R] = mR + delay_buf_R[(write_d_R - delay_samples) % max_delay] * delay_fb
+        oL = delay_buf_L[(write_d_L - delay_samples) % max_delay]
+        oR = delay_buf_R[(write_d_R - delay_samples) % max_delay]
+        write_d_L = (write_d_L + 1) % max_delay
+        write_d_R = (write_d_R + 1) % max_delay
+        dL = (1 - delay_mix) * mL + delay_mix * oL
+        dR = (1 - delay_mix) * mR + delay_mix * oR
+
+        processed_mid[i] = (dL, dR)
+        Utils.ProgressMsg("Heaven Or Vegas Chain", i+1, length)
+
+    # --- Double Tracking ---
+    if double_track == 1:
+        dt = dt_offset_samples
+        final = [ (0.0, 0.0) ] * length
+        for i in range(length):
+            L, R = processed_mid[i]
+            sumL = L
+            sumR = R
+            if i - dt >= 0:
+                sumL += processed_mid[i - dt][0] * 0.5
+                sumR += processed_mid[i - dt][1] * 0.5
+            if i + dt < length:
+                sumL += processed_mid[i + dt][0] * 0.5
+                sumR += processed_mid[i + dt][1] * 0.5
+            final[i] = (sumL / 2.0, sumR / 2.0)
+    else:
+        final = processed_mid
+
+    # --- Normalize ---
+    peak_out = 0.0
+    if chans == 1:
+        for v in final:
+            peak_out = max(peak_out, abs(v[0]))
+    else:
+        for L, R in final:
+            peak_out = max(peak_out, abs(L), abs(R))
+    peak_out = peak_out or 1.0
+    norm = peak_in / peak_out
+
+    # --- Write Back ---
+    if chans == 1:
+        for i in range(length):
+            EditorSample.SetSampleAt(x1 + i, 0, final[i][0] * norm)
+        EditorSample.NumChans = 1
+    else:
+        for i in range(length):
+            L, R = final[i]
+            EditorSample.SetSampleAt(x1 + i, 0, L * norm)
+            EditorSample.SetSampleAt(x1 + i, 1, R * norm)
+        EditorSample.NumChans = 2
+
+
+# =====================================
+# ===   E D I S O N   S C R I P T   ===
+# =====================================
+form = ScriptDialog(
+    "Cocteau Twins - Heaven Or Las Vegas Chain.",
+    "Tries to emulate a chain from “Heaven or Las Vegas”.\n"
+    "COMPRESSOR:  Off / 1178 / dbx\n"
+    "PITCH SPREAD (cents):    0 … 50\n\n"
+    "CHORUS RATE (Hz):        0.2 … 3.0\n"
+    "CHORUS DEPTH (ms):       1 … 10\n"
+    "CHORUS MIX:              0.0 … 1.0\n\n"
+    "BPM:                     40 … 300\n"
+    "DELAY DIVISION:          1/4, 1/8, 1/16, 1/8T\n"
+    "DELAY FB:                0.0 … 0.9\n"
+    "DELAY MIX:               0.0 … 1.0\n\n"
+    "DISTORTED:     Off / On\n"
+    "OD DRIVE:      1.0 … 10.0\n\n"
+    "DOUBLE TRACK:  Off / On\n"
+    "DT OFFSET (ms): 10 … 30\n\n"
+    "Load your guitar track, select it, and dial in for that classic Guthrie shimmer!\n"
+    "Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts"
+)
+
+form.AddInputCombo("COMPRESSOR",         ["Off","1178","dbx"], 1)
+form.AddInputKnob("PITCH SPREAD (cts)",  10.0,  0.0, 50.0)
+
+form.AddInputKnob("CHORUS RATE (Hz)",    1.0,   0.2,  3.0)
+form.AddInputKnob("CHORUS DEPTH (ms)",   5.0,   1.0, 10.0)
+form.AddInputKnob("CHORUS MIX",          0.7,   0.0,  1.0)
+
+form.AddInputKnob("BPM",               120.0,  40.0,300.0)
+form.AddInputCombo("DELAY DIVISION",     ["1/4","1/8","1/16","1/8T"], 1)
+form.AddInputKnob("DELAY FB",            0.3,   0.0,  0.9)
+form.AddInputKnob("DELAY MIX",           0.6,   0.0,  1.0)
+
+form.AddInputCombo("DISTORTED",         ["Off","On"], 0)
+form.AddInputKnob("OD DRIVE",            3.0,   1.0, 10.0)
+
+form.AddInputCombo("DOUBLE TRACK",      ["Off","On"], 1)
+form.AddInputKnob("DT OFFSET (ms)",     15.0,  10.0, 30.0)
+
+if form.Execute():
+    start_idx       = Editor.SelectionStartS
+    end_idx         = Editor.SelectionEndS
+    fs              = EditorSample.SampleRate
+
+    comp_idx        = form.GetInputValue("COMPRESSOR")
+    spread_cents    = form.GetInputValue("PITCH SPREAD (cts)")
+
+    chorus_rate     = form.GetInputValue("CHORUS RATE (Hz)")
+    chorus_depth    = form.GetInputValue("CHORUS DEPTH (ms)")
+    chorus_mix      = form.GetInputValue("CHORUS MIX")
+
+    bpm_val         = form.GetInputValue("BPM")
+    div_idx         = int(form.GetInputValue("DELAY DIVISION"))
+    delay_fb_val    = form.GetInputValue("DELAY FB")
+    delay_mix_val   = form.GetInputValue("DELAY MIX")
+
+    dist_flag       = int(form.GetInputValue("DISTORTED"))
+    od_drive_val    = form.GetInputValue("OD DRIVE")
+
+    dt_flag         = int(form.GetInputValue("DOUBLE TRACK"))
+    dt_offset_val   = form.GetInputValue("DT OFFSET (ms)")
+
+    process_heaven_or_vegas(start_idx, end_idx, fs,
+                            comp_idx,
+                            spread_cents,
+                            chorus_rate, chorus_depth, chorus_mix,
+                            bpm_val, div_idx, delay_fb_val, delay_mix_val,
+                            dist_flag, od_drive_val,
+                            dt_flag, dt_offset_val)
