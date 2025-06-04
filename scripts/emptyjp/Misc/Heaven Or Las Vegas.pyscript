@@ -3,7 +3,11 @@ import math
 import random
 
 # =========================================
-# Heaven Or Vegas Chain – Complete Guitar FX (Fixed Pitch-Spread Bounds)
+# Heaven Or Las Vegas Chain – Complete Chain from the album
+# As described by Robin Guthrie
+# with Stereo Chorus for Mono, Cut Tail at -72dB, and Oversampling (Rev. 2)
+# Preserves audio outside the selected range.
+# Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
 # =========================================
 
 def process_heaven_or_vegas(x1, x2, fs,
@@ -12,7 +16,8 @@ def process_heaven_or_vegas(x1, x2, fs,
                             chorus_rate, chorus_depth_ms, chorus_mix,
                             bpm, delay_division, delay_fb, delay_mix,
                             distorted, overdrive_drive,
-                            double_track, dt_offset_ms):
+                            double_track, dt_offset_ms,
+                            cut_tail, os_index):
     """
     x1, x2              : selection start/end (samples)
     fs                  : sample rate
@@ -23,36 +28,87 @@ def process_heaven_or_vegas(x1, x2, fs,
     chorus_mix          : 0..1
     bpm                 : beats per minute (for delay sync)
     delay_division      : index for ["1/4","1/8","1/16","1/8T"]
-    delay_fb            : 0..0.9
+    delay_fb            : 0..1.0
     delay_mix           : 0..1
     distorted           : 0=Off, 1=On
     overdrive_drive     : 1..10 gain for overdrive
     double_track        : 0=Off, 1=On
     dt_offset_ms        : 10..30 ms offset for double tracking
+    cut_tail            : 0=Yes (cut at original length), 1=No (cut at -72dB)
+    os_index            : 0=1×,1=2×,2=4×,3=8×,4=16×,5=MAX (32×)
     """
-    chans = EditorSample.NumChans if EditorSample.NumChans in (1, 2) else 1
-    length = x2 - x1 + 1
+    # Preserve entire original sample length and post-selection tail
+    orig_total_len = EditorSample.Length
+    post_sel = []
+    if x2 < orig_total_len - 1:
+        # store samples after the selection
+        for i in range(x2 + 1, orig_total_len):
+            if EditorSample.NumChans == 2:
+                L = EditorSample.GetSampleAt(i, 0)
+                R = EditorSample.GetSampleAt(i, 1)
+                post_sel.append((L, R))
+            else:
+                s = EditorSample.GetSampleAt(i, 0)
+                post_sel.append((s,))
 
-    # --- Read input into buffer & measure peak_in ---
+    # Determine oversample factor
+    if os_index == 0:
+        factor = 1
+    elif os_index == 1:
+        factor = 2
+    elif os_index == 2:
+        factor = 4
+    elif os_index == 3:
+        factor = 8
+    elif os_index == 4:
+        factor = 16
+    else:
+        factor = 32
+
+    # Read selection into buffer & measure peak_in
+    sel_len = x2 - x1 + 1
+    chans = EditorSample.NumChans if EditorSample.NumChans in (1, 2) else 1
     orig = []
     peak_in = 0.0
-    for i in range(length):
+    for i in range(sel_len):
+        idx = x1 + i
         if chans == 1:
-            s = EditorSample.GetSampleAt(x1 + i, 0)
+            s = EditorSample.GetSampleAt(idx, 0)
             orig.append((s,))
             peak_in = max(peak_in, abs(s))
         else:
-            L = EditorSample.GetSampleAt(x1 + i, 0)
-            R = EditorSample.GetSampleAt(x1 + i, 1)
+            L = EditorSample.GetSampleAt(idx, 0)
+            R = EditorSample.GetSampleAt(idx, 1)
             orig.append((L, R))
             peak_in = max(peak_in, abs(L), abs(R))
     peak_in = peak_in or 1.0
 
+    # Build upsampled buffer if needed
+    if factor > 1:
+        sel_len_up = sel_len * factor
+        if chans == 1:
+            orig_up = [0.0] * sel_len_up
+            for i in range(sel_len):
+                v = orig[i][0]
+                for k in range(factor):
+                    orig_up[i * factor + k] = v
+        else:
+            orig_up = [(0.0, 0.0)] * sel_len_up
+            for i in range(sel_len):
+                L, R = orig[i]
+                for k in range(factor):
+                    orig_up[i * factor + k] = (L, R)
+        fs_proc = fs * factor
+    else:
+        orig_up = orig
+        sel_len_up = sel_len
+        fs_proc = fs
+
     # --- Compressor Settings ---
     if compressor_type == 1:  # 1178
         comp_ratio = 4.0
-        comp_attack = 0.001  # 1 ms
-        comp_release = 0.1   # 100 ms
+        comp_attack = 0.001
+        comp_release = 0.1
         comp_threshold = 0.5
     elif compressor_type == 2:  # dbx 160
         comp_ratio = 6.0
@@ -62,10 +118,10 @@ def process_heaven_or_vegas(x1, x2, fs,
     else:
         comp_ratio = 1.0
         comp_attack = comp_release = 0.01
-        comp_threshold = 10.0  # effectively bypass
+        comp_threshold = 10.0
 
-    alpha_a = math.exp(-1.0 / (fs * comp_attack))
-    alpha_r = math.exp(-1.0 / (fs * comp_release))
+    alpha_a = math.exp(-1.0 / (fs_proc * comp_attack))
+    alpha_r = math.exp(-1.0 / (fs_proc * comp_release))
     env = [0.0] * chans
 
     # --- Pitch Spread Ratios ---
@@ -73,49 +129,49 @@ def process_heaven_or_vegas(x1, x2, fs,
     semitone_ratio_pos = 2 ** ((cents / 100.0) / 12.0)
     semitone_ratio_neg = 2 ** ((-cents / 100.0) / 12.0)
 
-    # Allocate buffers for pitch‐shifted stereo paths
-    pitched_L = [0.0] * length
-    pitched_R = [0.0] * length
+    # Allocate pitched arrays at upsampled rate
+    pitched_L = [0.0] * sel_len_up
+    pitched_R = [0.0] * sel_len_up
 
-    # Pre‐generate pitched buffers with proper bounds check
-    for idx in range(length):
-        # Left channel pitched up by +cents
-        pos_idx_L = idx / semitone_ratio_pos
+    # Pre‐generate pitched buffers
+    for idx in range(sel_len_up):
+        orig_idx_f = idx / factor
+        # Left pitched up
+        pos_idx_L = orig_idx_f / semitone_ratio_pos
         idx0 = int(math.floor(pos_idx_L))
         frac = pos_idx_L - idx0
-        if 0 <= idx0 < length:
-            s0 = orig[idx0][0] if chans == 1 else orig[idx0][0]
+        if 0 <= idx0 < sel_len:
+            s0 = orig[idx0][0]
         else:
             s0 = 0.0
         idx1 = idx0 + 1
-        if 0 <= idx1 < length:
-            s1 = orig[idx1][0] if chans == 1 else orig[idx1][0]
+        if 0 <= idx1 < sel_len:
+            s1 = orig[idx1][0]
         else:
             s1 = 0.0
         pitched_L[idx] = s0 + frac * (s1 - s0)
 
-        # Right channel pitched down by –cents
-        pos_idx_R = idx / semitone_ratio_neg
+        # Right pitched down
+        pos_idx_R = orig_idx_f / semitone_ratio_neg
         idx0 = int(math.floor(pos_idx_R))
         frac = pos_idx_R - idx0
         if chans == 2:
-            if 0 <= idx0 < length:
+            if 0 <= idx0 < sel_len:
                 s0 = orig[idx0][1]
             else:
                 s0 = 0.0
             idx1 = idx0 + 1
-            if 0 <= idx1 < length:
+            if 0 <= idx1 < sel_len:
                 s1 = orig[idx1][1]
             else:
                 s1 = 0.0
         else:
-            # For mono, use same data
-            if 0 <= idx0 < length:
+            if 0 <= idx0 < sel_len:
                 s0 = orig[idx0][0]
             else:
                 s0 = 0.0
             idx1 = idx0 + 1
-            if 0 <= idx1 < length:
+            if 0 <= idx1 < sel_len:
                 s1 = orig[idx1][0]
             else:
                 s1 = 0.0
@@ -124,45 +180,48 @@ def process_heaven_or_vegas(x1, x2, fs,
     if chans == 1:
         pitched_R = pitched_L[:]
 
-    # --- Chorus Setup (Dimension D–style subtle 4-voice) ---
-    chorus_max_delay = int(fs * 0.012)  # 12 ms max
+    # --- Chorus Setup: Stereo even if mono input ---
+    chorus_max_delay = int(fs_proc * 0.012)  # 12 ms max
     chorus_buf_L = [0.0] * (chorus_max_delay + 1)
     chorus_buf_R = [0.0] * (chorus_max_delay + 1)
     write_L = write_R = 0
-    phases = [0.0, math.pi/2, math.pi, 3*math.pi/2]
-    num_voices = 4
+    phase_L = 0.0
+    phase_R = math.pi
 
-    # --- Delay Setup (TC2290 style sync) ---
+    # --- Delay Setup ---
     quarter_sec = 60.0 / bpm
-    if delay_division == 0:  # 1/4
+    if delay_division == 0:
         delay_time = quarter_sec
-    elif delay_division == 1:  # 1/8
+    elif delay_division == 1:
         delay_time = quarter_sec / 2.0
-    elif delay_division == 2:  # 1/16
+    elif delay_division == 2:
         delay_time = quarter_sec / 4.0
-    else:  # 1/8 triplet
+    else:
         delay_time = quarter_sec / 3.0
 
-    delay_samples = int(delay_time * fs)
-    max_delay = delay_samples + int(delay_time * fs * 0.2) + 1
+    delay_samples = int(delay_time * fs_proc)
+    max_delay = delay_samples + int(delay_time * fs_proc * 0.2) + 1
     delay_buf_L = [0.0] * max_delay
     delay_buf_R = [0.0] * max_delay
     write_d_L = write_d_R = 0
 
-    # --- Overdrive Setup (Gallien Kruger–style) ---
+    # --- Overdrive Setup ---
     od_gain = overdrive_drive
 
     # --- Double-Tracking Setup ---
-    dt_offset_samples = int(dt_offset_ms * fs / 1000.0)
-    processed_mid = [ (0.0, 0.0) for _ in range(length) ]
+    dt_offset_samples = int(dt_offset_ms * fs_proc / 1000.0)
+    processed_mid = [ (0.0, 0.0) ] * sel_len_up
 
-    # --- Main Processing Loop ---
-    for i in range(length):
+    # --- Main Processing Loop (upsampled) ---
+    for i in range(sel_len_up):
         xL = pitched_L[i]
         xR = pitched_R[i]
 
         # 1) Compressor
-        for ch, x in enumerate((xL, xR)):
+        cxL = xL
+        cxR = xR
+        for ch in range(chans):
+            x = xL if ch == 0 else xR
             absx = abs(x)
             if absx > env[ch]:
                 env[ch] = alpha_a * env[ch] + (1 - alpha_a) * absx
@@ -180,7 +239,7 @@ def process_heaven_or_vegas(x1, x2, fs,
             else:
                 cxR = xR * gr
 
-        # 2) Overdrive if distorted
+        # 2) Overdrive
         if distorted == 1:
             dxL = math.tanh(cxL * od_gain)
             dxR = math.tanh(cxR * od_gain)
@@ -188,37 +247,41 @@ def process_heaven_or_vegas(x1, x2, fs,
             dxL = cxL
             dxR = cxR
 
-        # 3) Chorus (4 voices, mod around ~8 ms)
-        sumL = sumR = 0.0
-        for v in range(num_voices):
-            phases[v] += (2 * math.pi * chorus_rate) / fs
-            if phases[v] > 2 * math.pi:
-                phases[v] -= 2 * math.pi
-            mod = (math.sin(phases[v]) + 1.0) / 2.0
-            delay_ms = 8.0 + chorus_depth_ms * (mod - 0.5)
-            d_samples = int((delay_ms / 1000.0) * fs)
+        # 3) Chorus – Independent per L/R
+        phase_L += (2 * math.pi * chorus_rate) / fs_proc
+        if phase_L > 2 * math.pi:
+            phase_L -= 2 * math.pi
+        mod_L = (math.sin(phase_L) + 1.0) / 2.0
+        delay_ms_L = 8.0 + chorus_depth_ms * (mod_L - 0.5)
+        d_samples_L = int((delay_ms_L / 1000.0) * fs_proc)
 
-            idxL = write_L - d_samples
-            if idxL < 0:
-                idxL += (chorus_max_delay + 1)
-            sumL += chorus_buf_L[idxL]
-            chorus_buf_L[write_L] = dxL + chorus_buf_L[idxL] * 0.2
+        idxL = write_L - d_samples_L
+        if idxL < 0:
+            idxL += (chorus_max_delay + 1)
+        out_ch_L = chorus_buf_L[idxL]
+        chorus_buf_L[write_L] = dxL + chorus_buf_L[idxL] * 0.2
+        write_L = (write_L + 1) if write_L < chorus_max_delay else 0
 
-            idxR = write_R - d_samples
-            if idxR < 0:
-                idxR += (chorus_max_delay + 1)
-            sumR += chorus_buf_R[idxR]
-            chorus_buf_R[write_R] = dxR + chorus_buf_R[idxR] * 0.2
+        phase_R += (2 * math.pi * chorus_rate) / fs_proc
+        if phase_R > 2 * math.pi:
+            phase_R -= 2 * math.pi
+        mod_R = (math.sin(phase_R) + 1.0) / 2.0
+        delay_ms_R = 8.0 + chorus_depth_ms * (mod_R - 0.5)
+        d_samples_R = int((delay_ms_R / 1000.0) * fs_proc)
 
-            write_L = (write_L + 1) if write_L < chorus_max_delay else 0
-            write_R = (write_R + 1) if write_R < chorus_max_delay else 0
+        idxR = write_R - d_samples_R
+        if idxR < 0:
+            idxR += (chorus_max_delay + 1)
+        out_ch_R = chorus_buf_R[idxR]
+        chorus_buf_R[write_R] = dxR + chorus_buf_R[idxR] * 0.2
+        write_R = (write_R + 1) if write_R < chorus_max_delay else 0
 
-        cL = sumL / num_voices
-        cR = sumR / num_voices
+        cL = out_ch_L
+        cR = out_ch_R
         mL = (1 - chorus_mix) * dxL + chorus_mix * cL
         mR = (1 - chorus_mix) * dxR + chorus_mix * cR
 
-        # 4) Delay (TC2290‐style)
+        # 4) Delay
         delay_buf_L[write_d_L] = mL + delay_buf_L[(write_d_L - delay_samples) % max_delay] * delay_fb
         delay_buf_R[write_d_R] = mR + delay_buf_R[(write_d_R - delay_samples) % max_delay] * delay_fb
         oL = delay_buf_L[(write_d_L - delay_samples) % max_delay]
@@ -229,56 +292,158 @@ def process_heaven_or_vegas(x1, x2, fs,
         dR = (1 - delay_mix) * mR + delay_mix * oR
 
         processed_mid[i] = (dL, dR)
-        Utils.ProgressMsg("Heaven Or Vegas Chain", i+1, length)
+        Utils.ProgressMsg("Heaven Or Las Vegas Chain", i+1, sel_len_up)
+
+    # --- Construct final based on cut_tail ---
+    if cut_tail == 0:
+        # Yes: cut at original length (no tail)
+        if factor > 1:
+            proc = [ processed_mid[i * factor] for i in range(sel_len) ]
+        else:
+            proc = processed_mid[:sel_len]
+    else:
+        # No: extend until -72dB or max (selection + 1 minute)
+        tail_max_up = int(fs_proc * 60)
+        extended = processed_mid + [(0.0, 0.0)] * tail_max_up
+        total_len_up = sel_len_up + tail_max_up
+
+        # Build extended portion
+        for i in range(sel_len_up, total_len_up):
+            dxL = 0.0
+            dxR = 0.0
+
+            # Chorus L
+            phase_L += (2 * math.pi * chorus_rate) / fs_proc
+            if phase_L > 2 * math.pi:
+                phase_L -= 2 * math.pi
+            mod_L = (math.sin(phase_L) + 1.0) / 2.0
+            delay_ms_L = 8.0 + chorus_depth_ms * (mod_L - 0.5)
+            d_samples_L = int((delay_ms_L / 1000.0) * fs_proc)
+
+            idxL = write_L - d_samples_L
+            if idxL < 0:
+                idxL += (chorus_max_delay + 1)
+            out_ch_L = chorus_buf_L[idxL]
+            chorus_buf_L[write_L] = dxL + chorus_buf_L[idxL] * 0.2
+            write_L = (write_L + 1) if write_L < chorus_max_delay else 0
+
+            # Chorus R
+            phase_R += (2 * math.pi * chorus_rate) / fs_proc
+            if phase_R > 2 * math.pi:
+                phase_R -= 2 * math.pi
+            mod_R = (math.sin(phase_R) + 1.0) / 2.0
+            delay_ms_R = 8.0 + chorus_depth_ms * (mod_R - 0.5)
+            d_samples_R = int((delay_ms_R / 1000.0) * fs_proc)
+
+            idxR = write_R - d_samples_R
+            if idxR < 0:
+                idxR += (chorus_max_delay + 1)
+            out_ch_R = chorus_buf_R[idxR]
+            chorus_buf_R[write_R] = dxR + chorus_buf_R[idxR] * 0.2
+            write_R = (write_R + 1) if write_R < chorus_max_delay else 0
+
+            cL = out_ch_L
+            cR = out_ch_R
+            mL = (1 - chorus_mix) * dxL + chorus_mix * cL
+            mR = (1 - chorus_mix) * dxR + chorus_mix * cR
+
+            # Delay
+            delay_buf_L[write_d_L] = mL + delay_buf_L[(write_d_L - delay_samples) % max_delay] * delay_fb
+            delay_buf_R[write_d_R] = mR + delay_buf_R[(write_d_R - delay_samples) % max_delay] * delay_fb
+            oL = delay_buf_L[(write_d_L - delay_samples) % max_delay]
+            oR = delay_buf_R[(write_d_R - delay_samples) % max_delay]
+            write_d_L = (write_d_L + 1) % max_delay
+            write_d_R = (write_d_R + 1) % max_delay
+            dL = (1 - delay_mix) * mL + delay_mix * oL
+            dR = (1 - delay_mix) * mR + delay_mix * oR
+
+            extended[i] = (dL, dR)
+
+        # Downsample full extended to selection+1minute
+        total_out = sel_len + int(fs * 60)
+        if factor > 1:
+            proc = []
+            for i in range(total_out):
+                up_idx = i * factor
+                if up_idx < len(extended):
+                    proc.append(extended[up_idx])
+                else:
+                    proc.append((0.0, 0.0))
+        else:
+            proc = extended[:total_out]
+
+        # Normalize then trim at -72dB
+        peak_out = 0.0
+        for L, R in proc:
+            peak_out = max(peak_out, abs(L), abs(R))
+        peak_out = peak_out or 1.0
+        norm = peak_in / peak_out
+        normalized = [(L * norm, R * norm) for (L, R) in proc]
+
+        thresh = peak_in * (10 ** (-72.0 / 20.0))
+        last_idx = sel_len  # don't cut before selection ends
+        for i, (L, R) in enumerate(normalized):
+            if abs(L) > thresh or abs(R) > thresh:
+                last_idx = i
+        proc = normalized[: last_idx + 1]
 
     # --- Double Tracking ---
     if double_track == 1:
-        dt = dt_offset_samples
-        final = [ (0.0, 0.0) ] * length
-        for i in range(length):
-            L, R = processed_mid[i]
+        length_f = len(proc)
+        dt = int(dt_offset_ms * fs / 1000.0)
+        dt_buffer = proc[:]
+        final2 = [(0.0, 0.0)] * length_f
+        for i in range(length_f):
+            L, R = proc[i]
             sumL = L
             sumR = R
             if i - dt >= 0:
-                sumL += processed_mid[i - dt][0] * 0.5
-                sumR += processed_mid[i - dt][1] * 0.5
-            if i + dt < length:
-                sumL += processed_mid[i + dt][0] * 0.5
-                sumR += processed_mid[i + dt][1] * 0.5
-            final[i] = (sumL / 2.0, sumR / 2.0)
-    else:
-        final = processed_mid
+                sumL += dt_buffer[i - dt][0] * 0.5
+                sumR += dt_buffer[i - dt][1] * 0.5
+            if i + dt < length_f:
+                sumL += dt_buffer[i + dt][0] * 0.5
+                sumR += dt_buffer[i + dt][1] * 0.5
+            final2[i] = (sumL / 2.0, sumR / 2.0)
+        proc = final2
 
-    # --- Normalize ---
-    peak_out = 0.0
-    if chans == 1:
-        for v in final:
-            peak_out = max(peak_out, abs(v[0]))
-    else:
-        for L, R in final:
-            peak_out = max(peak_out, abs(L), abs(R))
-    peak_out = peak_out or 1.0
-    norm = peak_in / peak_out
+    # --- At this point, proc[] contains the processed selection + possible tail ---
 
-    # --- Write Back ---
-    if chans == 1:
-        for i in range(length):
-            EditorSample.SetSampleAt(x1 + i, 0, final[i][0] * norm)
-        EditorSample.NumChans = 1
-    else:
-        for i in range(length):
-            L, R = final[i]
-            EditorSample.SetSampleAt(x1 + i, 0, L * norm)
-            EditorSample.SetSampleAt(x1 + i, 1, R * norm)
-        EditorSample.NumChans = 2
+    # --- Write back: preserve pre-selection, write processed, then append post-selection ---
+    # Pre-selection is unchanged
+    # Overwrite from x1 onward
+    total_output_len = len(proc) + (orig_total_len - (x2 + 1))
+    EditorSample.NumChans = 2
+    EditorSample.Length = x1 + len(proc) + len(post_sel)
+
+    # Write processed portion at x1 ... x1+len(proc)-1
+    for i in range(len(proc)):
+        L, R = proc[i]
+        EditorSample.SetSampleAt(x1 + i, 0, L)
+        EditorSample.SetSampleAt(x1 + i, 1, R)
+
+    # Write preserved post-selection after processed portion
+    write_pos = x1 + len(proc)
+    for i, samp in enumerate(post_sel):
+        if chans == 1:
+            val = samp[0]
+            EditorSample.SetSampleAt(write_pos + i, 0, val)
+            EditorSample.SetSampleAt(write_pos + i, 1, val)
+        else:
+            L, R = samp
+            EditorSample.SetSampleAt(write_pos + i, 0, L)
+            EditorSample.SetSampleAt(write_pos + i, 1, R)
 
 
 # =====================================
 # ===   E D I S O N   S C R I P T   ===
 # =====================================
 form = ScriptDialog(
-    "Cocteau Twins - Heaven Or Las Vegas Chain.",
-    "Tries to emulate a chain from “Heaven or Las Vegas”.\n"
+    "Heaven Or Las Vegas Chain",
+    "Emulates full chain from “Heaven Or Las Vegas” with:\n"
+    "  • Stereo Chorus (even for mono input)\n"
+    "  • Cut Tail at original length (Yes) or -72dB (No)\n"
+    "  • Oversampling (1×…MAX)\n"
+    "  • Preserves audio outside the selection\n\n"
     "COMPRESSOR:  Off / 1178 / dbx\n"
     "PITCH SPREAD (cents):    0 … 50\n\n"
     "CHORUS RATE (Hz):        0.2 … 3.0\n"
@@ -286,14 +451,28 @@ form = ScriptDialog(
     "CHORUS MIX:              0.0 … 1.0\n\n"
     "BPM:                     40 … 300\n"
     "DELAY DIVISION:          1/4, 1/8, 1/16, 1/8T\n"
-    "DELAY FB:                0.0 … 0.9\n"
+    "DELAY FB:                0.0 … 1.0\n"
     "DELAY MIX:               0.0 … 1.0\n\n"
     "DISTORTED:     Off / On\n"
     "OD DRIVE:      1.0 … 10.0\n\n"
     "DOUBLE TRACK:  Off / On\n"
     "DT OFFSET (ms): 10 … 30\n\n"
+    "CUT TAIL:       Yes (cut @ original length) / No (cut @ -72dB)\n"
+    "OVERSAMPLE:     1×, 2×, 4×, 8×, 16×, MAX (32×)\n\n"
     "Load your guitar track, select it, and dial in for that classic Guthrie shimmer!\n"
-    "Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts"
+    "Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts\n\n"
+    "\"For that whole album I mainly used the Paul Reed Smith and my "
+    "1959 Fender Jazzmaster although for that song I played a customised Levinson "
+    "(a blue Jazzmaster shaped one with a Chandler maple neck) for the slide solo. "
+    "The clean guitar parts were the Paul Reed Smith played through a "
+    "Marshall 9000 series tube pre-amp directly into the board with my fave "
+    "Lexicon pitch shift +10/-10 cents to spread the sound to stereo, "
+    "followed with a little Roland Dimension D and echo from the TC2290, "
+    "synched to the bpm, the chorus, more distorted guitar part was played "
+    "through my Gallien Kruger preamp (channel 2) then the same sort of "
+    "treatment, tweaked differently. I should have said before but I normally "
+    "would compress the guitars to tape either with a Urei1178 or a pair "
+    "of dbx 160x's. Oh, and usually lots of double tracking\" - Robin Guthrie"
 )
 
 form.AddInputCombo("COMPRESSOR",         ["Off","1178","dbx"], 1)
@@ -305,7 +484,7 @@ form.AddInputKnob("CHORUS MIX",          0.7,   0.0,  1.0)
 
 form.AddInputKnob("BPM",               120.0,  40.0,300.0)
 form.AddInputCombo("DELAY DIVISION",     ["1/4","1/8","1/16","1/8T"], 1)
-form.AddInputKnob("DELAY FB",            0.3,   0.0,  0.9)
+form.AddInputKnob("DELAY FB",            0.5,   0.0,  1.0)
 form.AddInputKnob("DELAY MIX",           0.6,   0.0,  1.0)
 
 form.AddInputCombo("DISTORTED",         ["Off","On"], 0)
@@ -314,12 +493,15 @@ form.AddInputKnob("OD DRIVE",            3.0,   1.0, 10.0)
 form.AddInputCombo("DOUBLE TRACK",      ["Off","On"], 1)
 form.AddInputKnob("DT OFFSET (ms)",     15.0,  10.0, 30.0)
 
+form.AddInputCombo("CUT TAIL",          ["Yes","No"], 0)
+form.AddInputCombo("OVERSAMPLE",        ["1×","2×","4×","8×","16×","MAX"], 0)
+
 if form.Execute():
     start_idx       = Editor.SelectionStartS
     end_idx         = Editor.SelectionEndS
     fs              = EditorSample.SampleRate
 
-    comp_idx        = form.GetInputValue("COMPRESSOR")
+    comp_idx        = int(form.GetInputValue("COMPRESSOR"))
     spread_cents    = form.GetInputValue("PITCH SPREAD (cts)")
 
     chorus_rate     = form.GetInputValue("CHORUS RATE (Hz)")
@@ -337,10 +519,14 @@ if form.Execute():
     dt_flag         = int(form.GetInputValue("DOUBLE TRACK"))
     dt_offset_val   = form.GetInputValue("DT OFFSET (ms)")
 
+    cut_flag        = int(form.GetInputValue("CUT TAIL"))  # 0=Yes, 1=No
+    os_flag         = int(form.GetInputValue("OVERSAMPLE"))
+
     process_heaven_or_vegas(start_idx, end_idx, fs,
                             comp_idx,
                             spread_cents,
                             chorus_rate, chorus_depth, chorus_mix,
                             bpm_val, div_idx, delay_fb_val, delay_mix_val,
                             dist_flag, od_drive_val,
-                            dt_flag, dt_offset_val)
+                            dt_flag, dt_offset_val,
+                            cut_flag, os_flag)
