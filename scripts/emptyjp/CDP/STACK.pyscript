@@ -1,103 +1,159 @@
 from enveditor import *
 import math
+
 # Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
-# === Pitch-shift helper: compute input index for given output index and semitone shift ===
+
+# === Pitch-shift helper: compute input index for a given output index & semitone shift ===
 def get_shifted_index(out_idx, semitone_shift):
-    # For a positive semitone_shift, ratio > 1 → pitched-up (faster playback), so input index = out_idx * ratio
+    # A positive semitone_shift → ratio > 1 → pitched-up (faster playback).
     ratio = 2 ** (semitone_shift / 12.0)
     in_idx = int(math.floor(out_idx * ratio))
-    return in_idx  # may be out of bounds, handled by caller
+    return in_idx  # may be out of bounds; caller checks.
 
 # === Main Stack processing ===
 def process_stack(transpose, lean, propn, attack_offset, count, gain, cut_tail):
-    # 1) Determine selection range
+    # 1) Determine the selection range in the current sample
     x1 = Editor.SelectionStartS
     x2 = Editor.SelectionEndS
+    total_length = EditorSample.Length
+    num_chans = EditorSample.NumChans
+
+    # If no valid selection, treat the entire file as selection
     if x2 <= x1:
         x1 = 0
-        x2 = EditorSample.Length - 1
-    length = x2 - x1 + 1
+        x2 = total_length - 1
+
+    sel_len = x2 - x1 + 1
     sample_rate = EditorSample.SampleRate
 
-    # 2) Compute attack-time offset in samples (clamped to length−1)
-    offset_samples = min(int(round(attack_offset * sample_rate)), length - 1)
+    # 2) Capture pre-selection and post-selection segments verbatim
+    pre_sel = []
+    post_sel = []
 
-    # 3) Base segment (starting after attack offset)
-    base_start  = x1 + offset_samples
-    base_length = length - offset_samples
+    # 2a) Everything before x1
+    for i in range(0, x1):
+        if num_chans == 1:
+            pre_sel.append((EditorSample.GetSampleAt(i, 0),))
+        else:
+            L = EditorSample.GetSampleAt(i, 0)
+            R = EditorSample.GetSampleAt(i, 1)
+            pre_sel.append((L, R))
+
+    # 2b) Everything after x2
+    for i in range(x2 + 1, total_length):
+        if num_chans == 1:
+            post_sel.append((EditorSample.GetSampleAt(i, 0),))
+        else:
+            L = EditorSample.GetSampleAt(i, 0)
+            R = EditorSample.GetSampleAt(i, 1)
+            post_sel.append((L, R))
+
+    # 3) Compute attack-offset (in samples), clamped
+    offset_samples = min(int(round(attack_offset * sample_rate)), sel_len - 1)
+
+    # 4) Define “base segment” (post-attack) within the selection
+    base_start = x1 + offset_samples
+    base_length = sel_len - offset_samples
     if base_length <= 0:
-        return  # nothing to process
+        # Nothing to process; rebuild full file exactly as before
+        return
 
-    # 4) Compute maximum stretched length across all voices
+    # 5) Read that base segment (per channel) into a buffer “original[ch][i]”
+    original = [
+        [EditorSample.GetSampleAt(base_start + i, c) for i in range(base_length)]
+        for c in range(num_chans)
+    ]
+
+    # 6) Compute maximum stretched length among all voices
     max_length = 0.0
     for v in range(count):
         semitone_shift = v * transpose
         ratio = 2 ** (semitone_shift / 12.0)
-        # pitched length = base_length / ratio
-        voice_length = base_length / ratio if ratio != 0 else float('inf')
+        if ratio != 0:
+            voice_length = base_length / ratio
+        else:
+            voice_length = float('inf')
         if voice_length > max_length:
             max_length = voice_length
     max_length = int(math.ceil(max_length))
 
-    # 5) Apply PROPN (0…1) to this maximum length
+    # 7) Apply PROPN (0…1) to that max_length
     computed_out_length = max(1, int(round(max_length * propn)))
 
-    # 6) Determine out_length depending on "Cut Tail"
+    # 8) Decide final “out_length” for the processed selection:
+    #    - If cut_tail=True → out_length = base_length  (no extension)
+    #    - If cut_tail=False → out_length = max(base_length, computed_out_length)
     if cut_tail:
-        out_length = base_length  # keep original length (post-offset)
+        out_length = base_length
     else:
         out_length = max(base_length, computed_out_length)
 
-    # 7) If output length exceeds current segment length, extend sample length (only if not cutting tail)
-    if not cut_tail and out_length > length:
-        EditorSample.Length = x1 + out_length
+    # 9) Build a zero-initialized “stacked” buffer [chan][i] of size [num_chans][out_length]
+    stacked = [[0.0] * out_length for _ in range(num_chans)]
 
-    # 8) Read original segment into nested list: original[c][i]
-    original = [
-        [EditorSample.GetSampleAt(base_start + i, c) for i in range(base_length)]
-        for c in range(EditorSample.NumChans)
-    ]
-
-    # 9) Prepare accumulation buffer for stacked result
-    stacked = [[0.0 for _ in range(out_length)] for _ in range(EditorSample.NumChans)]
-
-    # 10) Sum each voice with pitch shift and LEAN weighting
+    # 10) For each voice v=0..count-1, pitch-shift and add into “stacked”
     for v in range(count):
         semitone_shift = v * transpose
-        if count > 1:
-            amp = lean ** (v / (count - 1))
-        else:
-            amp = 1.0
-
-        for i in range(out_length):
-            in_idx = get_shifted_index(i, semitone_shift)
+        amp = (lean ** (v / (count - 1))) if count > 1 else 1.0
+        for i_out in range(out_length):
+            in_idx = get_shifted_index(i_out, semitone_shift)
             if 0 <= in_idx < base_length:
-                for c in range(EditorSample.NumChans):
-                    stacked[c][i] += original[c][in_idx] * amp
-
+                for c in range(num_chans):
+                    stacked[c][i_out] += original[c][in_idx] * amp
         Utils.ProgressMsg(f"Stacking voice {v+1}/{count}", v + 1, count)
 
-    # 11) Normalize by total LEAN mass
+    # 11) Normalize by total LEAN mass so that summed gain = 1.0  (before applying “gain” knob)
     total_amp = 0.0
     for v in range(count):
-        if count > 1:
-            total_amp += lean ** (v / (count - 1))
-        else:
-            total_amp += 1.0
+        total_amp += (lean ** (v / (count - 1))) if count > 1 else 1.0
     if total_amp <= 0.0:
         total_amp = 1.0
 
-    # 12) Write result back to buffer
-    for i in range(out_length):
-        for c in range(EditorSample.NumChans):
-            val = (stacked[c][i] / total_amp) * gain
-            EditorSample.SetSampleAt(x1 + i, c, val)
+    # 12) Build “processed_sel” as a list of length = out_length, each entry = tuple of “num_chans”
+    processed_sel = []
+    for i_out in range(out_length):
+        samples = []
+        for c in range(num_chans):
+            val = (stacked[c][i_out] / total_amp) * gain
+            samples.append(val)
+        processed_sel.append(tuple(samples))
 
-    # 13) If cutting tail, zero out samples from end of base_length to original length
+    # 13) If cut_tail = True, we must keep selection length = sel_len,
+    #     but only “base_length” samples come from processed_sel; the remainder (sel_len - base_length) is zeros.
     if cut_tail:
-        for i in range(x1 + base_length, x1 + length):
-            for c in range(EditorSample.NumChans):
-                EditorSample.SetSampleAt(i, c, 0.0)
+        # A) Take processed_sel[0..base_length-1]
+        truncated = processed_sel[:base_length]
+        # B) Then append zeros for the gap up to sel_len
+        zero_part = []
+        for _ in range(sel_len - base_length):
+            zero_part.append(tuple([0.0]*num_chans))
+        processed_full_sel = truncated + zero_part  # length = sel_len
+    else:
+        # cut_tail = False → the entire processed_sel replaces the selection
+        processed_full_sel = processed_sel  # length = out_length
+
+    # 14) Now reconstruct the entire file as:
+    #     [ pre_sel ] + [ processed_full_sel ] + [ post_sel ]
+    new_samples = []
+    new_samples.extend(pre_sel)
+    new_samples.extend(processed_full_sel)
+    new_samples.extend(post_sel)
+
+    # 15) Write “new_samples” back into EditorSample:
+    #     - First, set the new file length = len(new_samples)
+    new_length = len(new_samples)
+    EditorSample.Length = new_length
+    EditorSample.NumChans = num_chans
+
+    # 16) Finally, write every sample from new_samples:
+    for i_out, samp in enumerate(new_samples):
+        if num_chans == 1:
+            EditorSample.SetSampleAt(i_out, 0, samp[0])
+        else:
+            EditorSample.SetSampleAt(i_out, 0, samp[0])
+            EditorSample.SetSampleAt(i_out, 1, samp[1])
+        Utils.ProgressMsg("Stack Processing", i_out + 1, new_length)
+
 
 # === Interface ===
 form = ScriptDialog(
@@ -113,13 +169,13 @@ form = ScriptDialog(
     "Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts"
 )
 
-form.AddInputKnob("TRANSPOSE",    0.0,  -60.0,  60.0)    # semitones
-form.AddInputKnob("LEAN",         1.0,    0.01, 100.0)   # ratio
-form.AddInputKnob("PROPN",        1.0,    0.0,   1.0)    # proportion 0..1
-form.AddInputKnob("ATTACK-TIME",  0.0,    0.0,   27.861) # seconds
-form.AddInputKnob("COUNT",        2.0,    2.0,   32.0)   # voices
-form.AddInputKnob("GAIN",         1.0,    0.1,   10.0)   # output gain
-form.AddInputCombo("CUT TAIL",    "Yes,No",              0)   # default: Yes (truncate)
+form.AddInputKnob("TRANSPOSE",     0.0,  -60.0,  60.0)    # semitones
+form.AddInputKnob("LEAN",          1.0,    0.01, 100.0)   # ratio
+form.AddInputKnob("PROPN",         1.0,    0.0,   1.0)    # proportion 0..1
+form.AddInputKnob("ATTACK-TIME",   0.0,    0.0,   27.861) # seconds
+form.AddInputKnob("COUNT",         2.0,    2.0,   32.0)   # voices
+form.AddInputKnob("GAIN",          1.0,    0.1,   10.0)   # output gain
+form.AddInputCombo("CUT TAIL",    ["Yes","No"],            0)  # default = “Yes”
 
 if form.Execute():
     transpose    = form.GetInputValue("TRANSPOSE")
@@ -128,6 +184,6 @@ if form.Execute():
     attack_time  = form.GetInputValue("ATTACK-TIME")
     count        = int(form.GetInputValue("COUNT"))
     gain         = form.GetInputValue("GAIN")
-    cut_tail     = (form.GetInputValue("CUT TAIL") == 0)  # 0 → Yes, 1 → No
+    cut_tail     = (form.GetInputValue("CUT TAIL") == 0)  # “Yes” → True, “No” → False
 
     process_stack(transpose, lean, propn, attack_time, count, gain, cut_tail)
