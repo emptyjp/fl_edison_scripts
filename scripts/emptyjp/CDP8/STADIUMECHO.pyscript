@@ -1,5 +1,5 @@
 from enveditor import *
-
+# Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
 def process_stadium_echo(gain, rolloff, gap_mult, echo_density, cut_tail):
     import random
     x1 = Editor.SelectionStartS
@@ -69,13 +69,13 @@ def process_stadium_echo(gain, rolloff, gap_mult, echo_density, cut_tail):
 
 
 # === GUI ===
-form = ScriptDialog("Stadium Echo (Dense)", "Dense stadium echo. Inspired by Soundshaper 6.\n\n"
+form = ScriptDialog("Stadium Echo (Dense)", "Dense stadium echo. Inspired by Soundshaper 6/CDP8.\n\n"
 "GAIN - Gain of the input signal\n"
 "ROLL-OFF - How fast the echo fades\n"
 "GAP SIZE - Effect on the scale of the delay between echoes\n"
 "COUNT - Echo density\n"
 "CUT TAIL - Whether to trim the tail (if No - the long tail of the echo is retained).\n\n"
-"Made by D. Stativkin with ChatGPT, GitHub - emptyjp")
+"Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts")
 form.AddInputKnob("GAIN", 0.646, 0.000031, 1.0)
 form.AddInputKnob("ROLL-OFF", 1.0, 0.000031, 1.0)
 form.AddInputKnob("GAP SIZE", 1.0, 0.000005, 50.0)

@@ -1,6 +1,6 @@
 from enveditor import *
 import math
-
+# Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
 # === Pitch-shift helper: compute input index for given output index and semitone shift ===
 def get_shifted_index(out_idx, semitone_shift):
     # For a positive semitone_shift, ratio > 1 → pitched-up (faster playback), so input index = out_idx * ratio
@@ -102,7 +102,7 @@ def process_stack(transpose, lean, propn, attack_offset, count, gain, cut_tail):
 # === Interface ===
 form = ScriptDialog(
     "Stack",
-    "Superimpose transposed copies of the selected audio. Inspired by SoundShaper 6.\n\n"
+    "Superimpose transposed copies of the selected audio. Inspired by SoundShaper 6/CDP8.\n\n"
     "TRANSPOSE: semitones between stacked voices (–60…+60).\n"
     "LEAN: loudness ratio of highest voice to lowest (0.01…100).\n"
     "PROPN: proportion of maximum stacked length to preserve (0…1).\n"
@@ -110,7 +110,7 @@ form = ScriptDialog(
     "COUNT: number of stacked voices (2…32).\n"
     "GAIN: overall output gain (0.1…10).\n"
     "CUT TAIL: Yes = truncate to original length; No = keep extended tail.\n\n"
-    "Made by D. Stativkin with ChatGPT. GitHub - emptyjp"
+    "Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts"
 )
 
 form.AddInputKnob("TRANSPOSE",    0.0,  -60.0,  60.0)    # semitones

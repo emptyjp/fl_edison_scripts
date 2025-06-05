@@ -1,6 +1,6 @@
 from enveditor import *
 import math
-
+# Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
 # === ACCEL: Accelerate/Decelerate over time ===
 def process_accel(start_time, stop_time, ratio):
     # Убедимся, что ratio > 0
@@ -103,7 +103,9 @@ form = ScriptDialog(
     "ACCEL changes speed by raising or lowering the pitch.\n"
     "START: Time (seconds) in the input where the change begins.\n"
     "STOP:  Time (seconds) in the output by which the target speed should be reached.\n"
-    "RATIO: Speed multiplier (<1 = slower, >1 = faster)."
+    "RATIO: Speed multiplier (<1 = slower, >1 = faster).\n"
+    "Inspired by CDP8\n"
+    "Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts"
 )
 
 file_len = EditorSample.Length / EditorSample.SampleRate

@@ -1,7 +1,7 @@
 from enveditor import *
 import math
 import random
-
+# Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts
 # === GRAIN HELPER: Get sample with bounds check ===
 def safe_get(samples, idx, default=0.0):
     if 0 <= idx < len(samples):
@@ -107,7 +107,8 @@ form = ScriptDialog(
     "VELOCITY: grain length modulation (0.0–1.0).\n"
     "DESPIKE: normalize output to prevent overload.\n"
     "GAIN: final output gain.\n\n"
-    "Made by D. Stativkin, GitHub - emptyjp"
+    "Made by D. Stativkin with love: https://github.com/emptyjp/fl_edison_scripts\n"
+    ":p"
 )
 
 form.AddInputKnob("GRAIN-LEN",   100.0,   1.0, 1000.0)
