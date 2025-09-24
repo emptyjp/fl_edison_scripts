@@ -1,6 +1,8 @@
 # FL Edison Scripts
 ## Sophisticated Image-Line Edison Scripts
 
+This is the result of my vibe coding a while ago. Vibe coding Edison scripts is fun, try it
+
 Latest additions: [Tubeopath Ultra](/scripts/emptyjp/Saturation/Tubeopath%20Ultra.pyscript), [Psychick Noise True Stereo](/scripts/emptyjp/Misc/Psychick%20Noise%20True%20Stereo.pyscript), [Psychick Modulations](/scripts/emptyjp/Misc/Psychick%20Modulations.pyscript), [Heaven or Las Vegas](/scripts/emptyjp/Misc/Heaven%20Or%20Las%20Vegas.pyscript)
 ## How to install these???
 
